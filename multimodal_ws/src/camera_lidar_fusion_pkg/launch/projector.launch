@@ -1,0 +1,11 @@
+<launch>
+  <node
+    pkg="camera_lidar_fusion_pkg"
+    type="projector.py
+    name="projector_node"
+    output="screen"
+  />
+   <param name="config_path" value="/home/knadmin/Ashwin/ros_projects/multimodal_ws/src/camera_lidar_fusion_pkg/config/kitti.yaml" />
+    </node>
+</launch>
+

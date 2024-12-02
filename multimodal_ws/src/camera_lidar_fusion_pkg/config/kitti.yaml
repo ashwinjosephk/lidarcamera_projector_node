@@ -1,0 +1,17 @@
+camera_topic: "/kitti/camera_color_right/image_raw"
+lidar_topic: "/kitti/velo/pointcloud"
+output_topic: "/projected_points"
+cam_to_cam_calibration_file: "/home/knadmin/Ashwin/Fusion/CV_tracking/kitti_tracker/2011_10_03/calib_cam_to_cam.txt"
+imu_to_velo_calibration_file: "/home/knadmin/Ashwin/Fusion/CV_tracking/kitti_tracker/2011_10_03/calib_imu_to_velo.txt"
+velo_to_cam_calibration_file: "/home/knadmin/Ashwin/Fusion/CV_tracking/kitti_tracker/2011_10_03/calib_velo_to_cam.txt"
+
+fine_tune_params:
+  detection_confidence: 0.5
+  max_depth: 50.0
+
+model_conf: 0.25
+model_iou: 0.45  
+
+
+
+

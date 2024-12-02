@@ -1,0 +1,18 @@
+# Ignore build and installation directories
+build/
+install/
+devel/
+
+# Ignore ROS-specific files and directories
+catkin_make.log
+
+# Common IDE and editor files
+.vscode/
+.idea/
+*.swp
+
+# Other common unwanted files
+*.pyc
+*.o
+*.so
+*.a
