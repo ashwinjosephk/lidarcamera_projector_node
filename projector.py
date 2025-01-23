@@ -10,6 +10,8 @@ from sensor_msgs.msg import Image
 from sensor_msgs.msg import PointField
 import sensor_msgs.point_cloud2 as pc2
 from threading import Lock
+import scipy.spatial
+import threading
 
 # Projection parameters
 fx, fy = 1089.8, 1086
@@ -67,65 +69,9 @@ def colorize_point_cloud(lidar_points, image, transformed_points):
     rospy.loginfo(f"Successfully colorized {len(colored_points)} points.")
     return colored_points
 
-# def overlay_points_on_ros_image(u, v, image, projected_image_publisher):
-#     """
-#     Draw projected points on the image and publish it as a ROS topic for visualization in RViz.
-#     """
-#     image_copy = image.copy()
-#     for i in range(len(u)):
-#         u_i = int(u[i])
-#         v_i = int(v[i])
 
-#         if 0 <= u_i < image.shape[1] and 0 <= v_i < image.shape[0]:
-#             cv2.circle(image_copy, (u_i, v_i), 2, (0, 255, 0), -1)  # Green points
 
-#     # Convert image to ROS format and publish
-#     projected_img_msg = bridge.cv2_to_imgmsg(image_copy, encoding="bgr8")
-#     projected_image_publisher.publish(projected_img_msg)
 
-# def overlay_points_on_ros_image(u, v, image, projected_image_publisher):
-#     """
-#     Draw projected points on the image using the same color as the image pixel.
-#     Publishes the image as a ROS topic.
-#     """
-#     image_copy = image.copy()
-
-#     for i in range(len(u)):
-#         u_i = int(u[i])
-#         v_i = int(v[i])
-
-#         if 0 <= u_i < image.shape[1] and 0 <= v_i < image.shape[0]:
-#             # Get the actual color from the image at this point
-#             color = image[v_i, u_i].tolist()  # Extract RGB color from the image
-#             cv2.circle(image_copy, (u_i, v_i), 2, color, -1)  # Draw point with same color
-
-#     # Convert image to ROS format and publish
-#     projected_img_msg = bridge.cv2_to_imgmsg(image_copy, encoding="bgr8")
-#     projected_image_publisher.publish(projected_img_msg)
-
-#     rospy.loginfo("Published projected LiDAR image with color-matched points.")
-def overlay_points_on_ros_image(u, v, image, projected_image_publisher):
-    """
-    Draw projected points onto a black image, using the corresponding color from the original image.
-    Publishes the image as a ROS topic.
-    """
-    img_h, img_w, _ = image.shape
-    black_image = np.zeros((img_h, img_w, 3), dtype=np.uint8)  # Create black image
-
-    for i in range(len(u)):
-        u_i = int(u[i])
-        v_i = int(v[i])
-
-        if 0 <= u_i < img_w and 0 <= v_i < img_h:
-            # Get the actual color from the original image at this point
-            color = image[v_i, u_i].tolist()  # Extract RGB color from the image
-            cv2.circle(black_image, (u_i, v_i), 2, color, -1)  # Draw point with same color
-
-    # Convert black image to ROS format and publish
-    projected_img_msg = bridge.cv2_to_imgmsg(black_image, encoding="bgr8")
-    projected_image_publisher.publish(projected_img_msg)
-
-    rospy.loginfo("Published projected LiDAR points onto a black image.")
 
 
 def overlay_points_on_black_image(u, v, image, projected_image_publisher):
@@ -230,9 +176,9 @@ class LidarCameraProjection:
         self.projected_image_topic = rospy.get_param("~projected_lidar_image", "/projected_lidar_image")
 
 
-        self.time_tolerance = rospy.get_param("~time_tolerance", 0.06)
+        self.time_tolerance = rospy.get_param("~time_tolerance", 0.03)
         self.processing_rate = rospy.get_param("~processing_rate", 10)  # Hz
-        self.skip_frames = rospy.get_param("~skip_frames", 3)
+        self.skip_frames = rospy.get_param("~skip_frames", 5)
 
         rospy.loginfo("Initializing publishers and subscribers.")
 
@@ -252,7 +198,7 @@ class LidarCameraProjection:
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.image_sub, self.lidar_sub],
-            queue_size=5,
+            queue_size=3,
             slop=self.time_tolerance
         )
         self.ts.registerCallback(self.callback)
@@ -276,7 +222,15 @@ class LidarCameraProjection:
         rospy.loginfo("Received synchronized LiDAR and image messages.")
 
 
+
+
+    
+
     def process_data(self, event):
+        threading.Thread(target=self.process_data_thread, daemon=True).start()
+
+    def process_data_thread(self):
+        """ Runs LiDAR processing in a separate thread to prevent blocking ROS. """
         with self.lock:
             if self.latest_data is None:
                 rospy.loginfo("No synchronized data available for processing.")
@@ -284,12 +238,6 @@ class LidarCameraProjection:
             image_msg, lidar_msg = self.latest_data
             self.latest_data = None
 
-        self.frame_count += 1
-
-        if self.frame_count % self.skip_frames != 0:
-            rospy.loginfo(f"Skipping frame {self.frame_count}")
-            return
-        
         try:
             rospy.loginfo("Processing synchronized data.")
 
@@ -304,10 +252,23 @@ class LidarCameraProjection:
 
             lidar_points = np.array(list(pc2.read_points(lidar_msg, field_names=("x", "y", "z"), skip_nans=True)))
 
-            project_points(lidar_points, image, self.projection_publisher, self.mask_publisher, self.colorized_publisher, self.projected_image_publisher)
+            # 🏎️ Faster densification
+            # lidar_points = densify_pointcloud(lidar_points, num_extra_points=2)
+
+            rospy.loginfo(f"Densified LiDAR points count: {lidar_points.shape[0]}")
+
+            project_points(
+                lidar_points, 
+                image, 
+                self.projection_publisher, 
+                self.mask_publisher, 
+                self.colorized_publisher, 
+                self.projected_image_publisher
+            )
 
         except Exception as e:
             rospy.logerr(f"Error in process_data: {e}")
+
 
 
 def main():
