@@ -105,7 +105,6 @@ output_pcd_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_filt
 lidar_topic = "/VLP32/velodyne_points"
 image_topic = "/zed2i/zed_node/left/image_rect_color/compressed"
 odometry_topic = "/lio_sam/mapping/odometry"
-# Set output directory for saving point cloud TXT files
 output_txt_dir = "30_bridgecurve_80m_100kmph_BTUwDLR"
 
 frame_count = 0  # Counter for frame-based naming
@@ -176,7 +175,7 @@ for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
         
         print(f"Processing LiDAR at {timestamp} -> Closest odometry at {closest_time} (Δt = {abs(closest_time - timestamp):.3f}s)")
         
-        # Convert LiDAR message to numpy array
+        # Convert LiDAR message to numpy array- every single lidar point in this topic
         lidar_points = np.array(list(pc2.read_points(
                 msg, field_names=("x", "y", "z", "intensity", "ring", "time"), skip_nans=True)))
         
@@ -187,7 +186,7 @@ for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
 
 
         
-        # Apply LiDAR to Camera transformation
+        # Apply LiDAR to Camera transformation for lidar to camera projection- every point still there
         transformed_points = rigid_transform(lidar_points[:, :3], R, translation)
 
         Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
@@ -205,8 +204,10 @@ for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
 
         #checking if projected 2d points are within image boundary
         valid_points = (x_proj >= 0) & (x_proj < image.shape[1]) & (y_proj >= 0) & (y_proj < image.shape[0])
-        x_proj, y_proj = x_proj[valid_points], y_proj[valid_points]
+        count_trues_projected = np.sum(valid_points)
+        print("Number of valid points after using points within image {} (and after z axes filtering)".format(count_trues_projected))
 
+        x_proj, y_proj = x_proj[valid_points], y_proj[valid_points]
 
         # 1️⃣ Create the original image with red-projected points
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -219,14 +220,17 @@ for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
             mask[y_start:y_end, x_start:x_end] = 255  # White mask
 
         colored_points, valid_indices  = colorize_point_cloud(lidar_points, image, transformed_points)
+
+
+
+
         # Save transformed + colorized LiDAR points to TXT
         save_pointcloud_to_txt(frame_count, transformed_points, colored_points, valid_indices, timestamp, lidar_points)
 
         frame_count += 1  # Increment frame count
         
         valid_points = points[valid_indices] 
-        valid_intensity = lidar_points[valid_indices, 3]
-        valid_ring = lidar_points[valid_indices, 4]
+    
 
         # colors = np.zeros((points.shape[0], 3), dtype=np.uint8)
 
@@ -254,9 +258,9 @@ for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
 
 
         # Step 4: Extract valid colors (Expanded for debugging)
-        colors = np.zeros((len(colored_points), 3))  # Initialize color array
+        colors = np.zeros((len(valid_indices), 3))  # Initialize color array
 
-        total_points = len(colored_points)  # Total number of valid colorized points
+        total_points = len(valid_indices)  # Total number of valid colorized points
         non_black_count = 0  # Counter for non-black points
 
         for idx, point in enumerate(colored_points):
@@ -267,8 +271,8 @@ for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
             g_norm = g / 255.0
             b_norm = b / 255.0
 
-            # colors[idx] = [r_norm, g_norm, b_norm]
-            colors[idx] = [1, 0, 0]
+            colors[idx] = [r_norm, g_norm, b_norm]
+            # colors[idx] = [1, 0, 0]
 
             # Check if the point is non-black
             if (r, g, b) != (0, 0, 0):
@@ -288,13 +292,13 @@ for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
         pcd_points.append(transformed_points)
         colors = colors.astype(np.float32)
 
-        colors_list.append(colors / 255.0)
+        colors_list.append(colors)
         intensity_list.append(intensity)
         ring_list.append(ring)
 
         cv2.imshow("Display_Image", image_with_red) 
         cv2.imshow("Display_Image2", black_image) 
-        cv2.waitKey(30) 
+        cv2.waitKey(50) 
 
 
 cv2.destroyAllWindows()
@@ -325,7 +329,7 @@ o3d.io.write_point_cloud(output_pcd_file, pcd)
 lidar_bag.close()
 
 # Visualize the final point cloud
-o3d.visualization.draw_geometries([pcd], window_name="Photorealistic 3D Map",
+o3d.visualization.draw_geometries([pcd], window_name="Photorealistic 3D Map (Not yet)",
                                   point_show_normal=False)
 
 
