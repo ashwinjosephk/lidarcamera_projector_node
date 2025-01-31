@@ -8,6 +8,8 @@ import cv2
 import os
 import shutil
 import time
+from scipy.spatial import KDTree
+import matplotlib.pyplot as plt
 
 # Camera Intrinsics (to be dynamically set instead of hardcoded values)
 camera_intrinsics = {
@@ -112,6 +114,82 @@ def generate_boat_trajectory_pcd(odometry_data):
 
     return trajectory_pcd  # Return the trajectory point cloud
 
+def remove_water_using_ransac(pcd, distance_threshold=0.3, ransac_n=3, num_iterations=1000):
+    """
+    Removes flat surfaces like water using RANSAC plane segmentation.
+    :param pcd: Open3D point cloud object
+    :param distance_threshold: Max distance a point can be from the plane to be considered an inlier
+    :param ransac_n: Number of points used to estimate the plane
+    :param num_iterations: Number of iterations to run RANSAC
+    :return: Filtered point cloud without the detected plane (water)
+    """
+
+    print("Applying RANSAC to remove water reflections...")
+
+    # Segment the dominant plane (likely the water surface)
+    plane_model, inlier_indices = pcd.segment_plane(distance_threshold=distance_threshold,
+                                                    ransac_n=ransac_n,
+                                                    num_iterations=num_iterations)
+    
+    # Extract inliers (plane points) and outliers (remaining points)
+    inlier_cloud = pcd.select_by_index(inlier_indices)  # This contains the plane (water) points
+    outlier_cloud = pcd.select_by_index(inlier_indices, invert=True)  # These are the remaining points
+    
+    print(f"Removed {len(inlier_indices)} points belonging to the water surface.")
+    
+    return outlier_cloud
+
+def voxel_grid_downsample(pcd, voxel_size=0.2):
+    """
+    Apply voxel grid downsampling to reduce the number of points.
+    :param pcd: Open3D point cloud object
+    :param voxel_size: The size of each voxel (lower values retain more detail)
+    :return: Downsampled point cloud
+    """
+    print(f"Applying Voxel Grid Downsampling with voxel size: {voxel_size}")
+    downsampled_pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+    print(f"Reduced point count from {len(pcd.points)} to {len(downsampled_pcd.points)}")
+    return downsampled_pcd
+
+
+def compute_map_entropy(pcd, num_bins=50):
+    """
+    Compute entropy of a point cloud based on point density.
+    :param pcd: Open3D point cloud object
+    :param num_bins: Number of bins for histogram
+    :return: Entropy value and nearest distance histogram
+    """
+    points = np.asarray(pcd.points)
+
+    # Compute nearest neighbor distances
+    tree = KDTree(points)
+    nearest_distances, _ = tree.query(points, k=2)  # Find nearest neighbor for each point
+    nearest_distances = nearest_distances[:, 1]  # Ignore self-distance
+
+    # Compute histogram of nearest distances
+    hist, bins = np.histogram(nearest_distances, bins=num_bins, density=True)
+
+    # Compute entropy from histogram
+    prob = hist / hist.sum()
+    entropy = -np.sum(prob * np.log2(prob + 1e-9))  # Avoid log(0)
+
+    print(f"Map Entropy: {entropy:.4f}")
+    return entropy, nearest_distances
+
+def plot_entropy_distribution(nearest_distances, num_bins=50):
+    """
+    Plot histogram of nearest neighbor distances to understand entropy.
+    """
+    plt.figure(figsize=(8, 5))
+    plt.hist(nearest_distances, bins=num_bins, color='blue', alpha=0.7, density=True)
+    plt.xlabel("Nearest Neighbor Distance")
+    plt.ylabel("Frequency")
+    plt.title("Distribution of Point Distances (Map Entropy Analysis)")
+    plt.grid(True)
+    plt.show()
+
+
+
 if __name__=="__main__":
     # Paths to ROS bags and output file
     lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR.bag"
@@ -122,7 +200,11 @@ if __name__=="__main__":
     image_topic = "/zed2i/zed_node/left/image_rect_color/compressed"
     odometry_topic = "/lio_sam/mapping/odometry"
     output_txt_dir = "30_bridgecurve_80m_100kmph_BTUwDLR"
+
     trajectory_flag = True
+    apply_ransac_flag = True
+    compute_map_entropy_flag = True
+    downsample_pcd_flag = True
 
     frame_count = 0  # Counter for frame-based naming
 
@@ -236,13 +318,15 @@ if __name__=="__main__":
                 image_with_red[y_start:y_end, x_start:x_end] = [0, 0, 255]  # Red color
                 mask[y_start:y_end, x_start:x_end] = 255  # White mask
 
-            colored_points, valid_indices  = colorize_point_cloud(lidar_points, image, transformed_points)
+            colored_points_rgb, valid_indices  = colorize_point_cloud(lidar_points, image, transformed_points)
 
+            #Part of the code to use for using semantic iamge color
+            # colored_points_semantic, valid_indices  = colorize_point_cloud(lidar_points, semantic_image, transformed_points)
 
 
 
             # Save transformed + colorized LiDAR points to TXT
-            save_pointcloud_to_txt(frame_count, transformed_points, colored_points, valid_indices, timestamp, lidar_points)
+            save_pointcloud_to_txt(frame_count, transformed_points, colored_points_rgb, valid_indices, timestamp, lidar_points)
 
             frame_count += 1  # Increment frame count
             
@@ -251,7 +335,7 @@ if __name__=="__main__":
 
             # colors = np.zeros((points.shape[0], 3), dtype=np.uint8)
 
-            print("checking length", len(colored_points), len(valid_indices))
+            print("checking length", len(colored_points_rgb), len(valid_indices))
             points_counter += len(valid_indices)
             # import pdb;pdb.set_trace()
 
@@ -280,7 +364,7 @@ if __name__=="__main__":
             total_points = len(valid_indices)  # Total number of valid colorized points
             non_black_count = 0  # Counter for non-black points
 
-            for idx, point in enumerate(colored_points):
+            for idx, point in enumerate(colored_points_rgb):
                 x, y, z, r, g, b = point  # Unpack each point with color values
 
                 # Normalize RGB values (Open3D expects colors in range [0,1])
@@ -296,13 +380,13 @@ if __name__=="__main__":
                     non_black_count += 1
 
                 # Debugging: Print first 10 points
-                if idx < 10:
-                    print(f"Point {idx}: XYZ=({x:.3f}, {y:.3f}, {z:.3f}) RGB=({r}, {g}, {b}) -> Normalized=({r_norm:.3f}, {g_norm:.3f}, {b_norm:.3f})")
+                # if idx < 10:
+                #     print(f"Point {idx}: XYZ=({x:.3f}, {y:.3f}, {z:.3f}) RGB=({r}, {g}, {b}) -> Normalized=({r_norm:.3f}, {g_norm:.3f}, {b_norm:.3f})")
 
             # Final Debugging Check
-            print(f"Out of {total_points} colorized points, {non_black_count} have non-black colors.")
-            if non_black_count == 0:
-                print("⚠ Warning: All colorized points are black! Check projection and color extraction logic.")
+            # print(f"Out of {total_points} colorized points, {non_black_count} have non-black colors.")
+            # if non_black_count == 0:
+            #     print("⚠ Warning: All colorized points are black! Check projection and color extraction logic.")
 
         
             # Append to global lists
@@ -319,7 +403,7 @@ if __name__=="__main__":
 
 
     cv2.destroyAllWindows()
-
+    print("************************")
 
     # Convert to Open3D format
     pcd_points = np.vstack(pcd_points)
@@ -335,6 +419,21 @@ if __name__=="__main__":
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pcd_points)
     pcd.colors = o3d.utility.Vector3dVector(colors_list)
+
+
+
+
+    if apply_ransac_flag:
+        # Apply RANSAC to remove water reflections (ground-like surface)
+        pcd = remove_water_using_ransac(pcd)
+
+    if compute_map_entropy_flag:
+        # Compute entropy
+        entropy, nearest_distances = compute_map_entropy(pcd)
+        plot_entropy_distribution(nearest_distances)
+
+    if downsample_pcd_flag:
+        pcd = voxel_grid_downsample(pcd, voxel_size=0.2)  # Adjust voxel size for detail
 
     if trajectory_flag:
         # Generate trajectory point cloud for the boat's movement
