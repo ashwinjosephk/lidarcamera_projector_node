@@ -282,7 +282,8 @@ if __name__=="__main__":
     lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR.bag"
     odometry_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR_trajectory.bag"
     original_bag_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR_images/images"
-    output_pcd_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_filtered.ply"
+    output_pcd_semantic_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_semantic.ply"
+    output_pcd_photo_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_photo.ply"
     output_trajectory_pcd_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_trajectory.ply"
     lidar_topic = "/VLP32/velodyne_points"
     image_topic = "/zed2i/zed_node/left/image_rect_color/compressed"
@@ -356,7 +357,8 @@ if __name__=="__main__":
 
     # Process LiDAR and Image data together
     pcd_points = []
-    colors_list = []
+    photo_colors_list = []
+    semantic_colors_list = []
     intensity_list = []
     ring_list = []
 
@@ -384,6 +386,7 @@ if __name__=="__main__":
             closest_idx = np.argmin(np.abs(np.array(odometry_timestamps) - timestamp))
             closest_time, position, orientation = odometry_data[closest_idx]
 
+            frame_inference_start_time = time.time()
             print("**************************")
             print("Frame counter", frame_count)
             
@@ -433,15 +436,18 @@ if __name__=="__main__":
                 image_with_red[y_start:y_end, x_start:x_end] = [0, 0, 255]  # Red color
                 mask[y_start:y_end, x_start:x_end] = 255  # White mask
 
-            # colored_points_rgb, valid_indices  = colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points)
+            colored_points_photo, valid_indices  = colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points)
 
             #code part to run inference of semantic segmentation
             semantic_predictions, semantic_color_mask = semantic_segmentation_inference(image, model, processor)
             semantic_color_mask = cv2.cvtColor(semantic_color_mask, cv2.COLOR_RGB2BGR)
 
+            frame_inference_end_time = time.time()
+            frame_inference_duration = frame_inference_end_time - frame_inference_start_time
+            print("Per Frame inference Time",frame_inference_duration)
 
             #Part of the code to use for using semantic iamge color
-            colored_points_rgb, valid_indices = colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions)
+            colored_points_semantic, valid_indices = colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions)
 
 
             # Overlay segmentation mask on original image
@@ -459,7 +465,7 @@ if __name__=="__main__":
 
             # colors = np.zeros((points.shape[0], 3), dtype=np.uint8)
 
-            print("checking length", len(colored_points_rgb), len(valid_indices))
+            print("checking length", len(colored_points_semantic), len(valid_indices))
             points_counter += len(valid_indices)
             # import pdb;pdb.set_trace()
 
@@ -483,12 +489,13 @@ if __name__=="__main__":
 
 
             # Step 4: Extract valid colors (Expanded for debugging)
-            colors = np.zeros((len(valid_indices), 3))  # Initialize color array
+            semantic_colors = np.zeros((len(valid_indices), 3))  # Initialize color array
+            photo_colors = np.zeros((len(valid_indices), 3))  # Initialize color array
 
             total_points = len(valid_indices)  # Total number of valid colorized points
             non_black_count = 0  # Counter for non-black points
 
-            for idx, point in enumerate(colored_points_rgb):
+            for idx, point in enumerate(colored_points_semantic):
                 x, y, z, r, g, b = point  # Unpack each point with color values
 
                 # Normalize RGB values (Open3D expects colors in range [0,1])
@@ -496,28 +503,30 @@ if __name__=="__main__":
                 g_norm = g / 255.0
                 b_norm = b / 255.0
 
-                colors[idx] = [r_norm, g_norm, b_norm]
+                semantic_colors[idx] = [r_norm, g_norm, b_norm]
                 # colors[idx] = [1, 0, 0]
 
-                # Check if the point is non-black
-                if (r, g, b) != (0, 0, 0):
-                    non_black_count += 1
+            for idx, point in enumerate(colored_points_photo):
+                x, y, z, r, g, b = point  # Unpack each point with color values
 
-                # Debugging: Print first 10 points
-                # if idx < 10:
-                #     print(f"Point {idx}: XYZ=({x:.3f}, {y:.3f}, {z:.3f}) RGB=({r}, {g}, {b}) -> Normalized=({r_norm:.3f}, {g_norm:.3f}, {b_norm:.3f})")
+                # Normalize RGB values (Open3D expects colors in range [0,1])
+                r_norm = r / 255.0
+                g_norm = g / 255.0
+                b_norm = b / 255.0
 
-            # Final Debugging Check
-            # print(f"Out of {total_points} colorized points, {non_black_count} have non-black colors.")
-            # if non_black_count == 0:
-            #     print("⚠ Warning: All colorized points are black! Check projection and color extraction logic.")
+                photo_colors[idx] = [r_norm, g_norm, b_norm]
+                # colors[idx] = [1, 0, 0]
+
+
+
 
         
             # Append to global lists
             pcd_points.append(transformed_points)
-            colors = colors.astype(np.float32)
-
-            colors_list.append(colors)
+            semantic_colors = semantic_colors.astype(np.float32)
+            photo_colors = photo_colors.astype(np.float32)
+            semantic_colors_list.append(semantic_colors)
+            photo_colors_list.append(photo_colors)
             intensity_list.append(intensity)
             ring_list.append(ring)
 
@@ -535,7 +544,8 @@ if __name__=="__main__":
 
     # Convert to Open3D format
     pcd_points = np.vstack(pcd_points)
-    colors_list = np.vstack(colors_list)
+    semantic_colors_list = np.vstack(semantic_colors_list)
+    photo_colors_list = np.vstack(photo_colors_list)
     intensity_list = np.hstack(intensity_list)[:, None]  # Ensure correct shape
     ring_list = np.hstack(ring_list)[:, None]
 
@@ -545,31 +555,38 @@ if __name__=="__main__":
 
 
     # Create structured Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pcd_points)
-    pcd.colors = o3d.utility.Vector3dVector(colors_list)
-    # pcd.semantic_labels = np.array([point[6] for point in colored_points_semantic])
+    pcd_semantic = o3d.geometry.PointCloud()
+    pcd_semantic.points = o3d.utility.Vector3dVector(pcd_points)
+    pcd_semantic.colors = o3d.utility.Vector3dVector(semantic_colors_list)
+
+    pcd_photo = o3d.geometry.PointCloud()
+    pcd_photo.points = o3d.utility.Vector3dVector(pcd_points)
+    pcd_photo.colors = o3d.utility.Vector3dVector(photo_colors_list)
+    
 
     # car_points = filter_points_by_class(pcd, car_class_label)
 
     if apply_ransac_flag:
         # Apply RANSAC to remove water reflections (ground-like surface)
-        pcd = remove_water_using_ransac(pcd)
+        pcd_semantic = remove_water_using_ransac(pcd_semantic)
+        pcd_photo = remove_water_using_ransac(pcd_photo)
 
     if compute_map_entropy_flag:
         # Compute entropy
-        entropy, nearest_distances = compute_map_entropy(pcd)
+        entropy, nearest_distances = compute_map_entropy(pcd_semantic)
         plot_entropy_distribution(nearest_distances)
 
     if downsample_pcd_flag:
-        pcd = voxel_grid_downsample(pcd, voxel_size=0.2)  # Adjust voxel size for detail
+        pcd_semantic = voxel_grid_downsample(pcd_semantic, voxel_size=0.2)  # Adjust voxel size for detail
+        pcd_photo = voxel_grid_downsample(pcd_photo, voxel_size=0.2) 
 
     if trajectory_flag:
         # Generate trajectory point cloud for the boat's movement
         trajectory_pcd = generate_boat_trajectory_pcd(odometry_data)
 
         # Merge LiDAR and trajectory point clouds into one visualization
-        combined_pcd = pcd + trajectory_pcd  # Combine both datasets
+        combined_pcd_semantic = pcd_semantic + trajectory_pcd  # Combine both datasets
+        combined_pcd_photo = pcd_photo + trajectory_pcd 
 
 
     end_time = time.time()
@@ -577,24 +594,27 @@ if __name__=="__main__":
     print("Total TIme taken",time_taken)
 
     # Save the final point cloud
-    print(f"Saving final 3D map to {output_pcd_file}")
-       
+    print(f"Saving final Semantic 3D map to {output_pcd_semantic_file}")
+    
 
     if trajectory_flag:
 
-        o3d.io.write_point_cloud(output_pcd_file, combined_pcd)
+        o3d.io.write_point_cloud(output_pcd_semantic_file, combined_pcd_semantic)
         o3d.io.write_point_cloud(output_trajectory_pcd_file, trajectory_pcd)
         # Visualize both LiDAR map and Boat trajectory together
-        o3d.visualization.draw_geometries([pcd], 
-                                        window_name="3D Map + Boat Trajectory",
+        o3d.visualization.draw_geometries([pcd_semantic], 
+                                        window_name="Semantic 3D Map + Boat Trajectory",
+                                        point_show_normal=False)
+        o3d.visualization.draw_geometries([pcd_photo], 
+                                        window_name="Semantic 3D Map + Boat Trajectory",
                                         point_show_normal=False)
         o3d.visualization.draw_geometries([trajectory_pcd], 
                                         window_name="Boat Trajectory",
                                         point_show_normal=False)
     else:
-        o3d.io.write_point_cloud(output_pcd_file, pcd)
+        o3d.io.write_point_cloud(output_pcd_semantic_file, pcd_semantic)
         # Visualize the final point cloud
-        o3d.visualization.draw_geometries([pcd], window_name="Photorealistic 3D Map (Not yet)",
+        o3d.visualization.draw_geometries([pcd_semantic], window_name="Photorealistic 3D Map (Not yet)",
                                         point_show_normal=False)
 
     lidar_bag.close()
