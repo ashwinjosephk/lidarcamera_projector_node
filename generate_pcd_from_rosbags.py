@@ -10,6 +10,10 @@ import shutil
 import time
 from scipy.spatial import KDTree
 import matplotlib.pyplot as plt
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+import torch
+from PIL import Image
+
 
 # Camera Intrinsics (to be dynamically set instead of hardcoded values)
 camera_intrinsics = {
@@ -19,7 +23,9 @@ camera_intrinsics = {
     "cy": 638.8
 }
 
-def colorize_point_cloud(lidar_points, image, transformed_points):
+
+
+def colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points):
     """Colorize the point cloud based on the image colors with correct RGB values."""
     print("Colorizing the point cloud with RGB values.")
 
@@ -52,6 +58,44 @@ def colorize_point_cloud(lidar_points, image, transformed_points):
 
     print("Successfully colorized {} points.".format(len(colored_points)))
     return colored_points, valid_indices
+
+def colorize_point_cloud_semantic(lidar_points, image, transformed_points,semantic_image):
+    """Colorize the point cloud based on the image colors with correct RGB values."""
+    print("Colorizing the point cloud with RGB values.")
+
+    Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
+    
+    # Step 1: Find valid points that are in front of the camera (Z > 0)
+    valid_indices = np.where(Zc > 0)[0]  # Get indices directly to maintain order
+    Xc, Yc, Zc = Xc[valid_indices], Yc[valid_indices], Zc[valid_indices]
+
+    # Step 2: Project the valid points into the image plane
+    x_proj = (camera_intrinsics["fx"] * Xc / Zc + camera_intrinsics["cx"]).astype(int)
+    y_proj = (camera_intrinsics["fy"] * Yc / Zc + camera_intrinsics["cy"]).astype(int)
+
+
+    # Step 3: Find points that fall within the image bounds
+    inside_image = (x_proj >= 0) & (x_proj < image.shape[1]) & (y_proj >= 0) & (y_proj < image.shape[0])
+    
+    # Step 4: Apply the mask to retain only valid points (ensuring order is kept)
+    valid_indices = valid_indices[inside_image]
+    x_proj, y_proj = x_proj[inside_image], y_proj[inside_image]
+
+    # Step 4: Extract semantic labels
+    semantic_labels = semantic_predictions[y_proj, x_proj]  # Get semantic class at projection
+
+    # Step 5: Assign RGB color from category colors
+    colored_points = [
+        (lidar_points[i][0], lidar_points[i][1], lidar_points[i][2], 
+         *CATEGORY_COLORS[int(semantic_labels[j])][0])  # Convert label to RGB color
+        for j, i in enumerate(valid_indices)
+    ]
+
+    print(f"Successfully colorized {len(colored_points)} points using semantic segmentation.")
+    return colored_points, valid_indices
+
+    
+
 
 def overlay_points_on_black_image(u, v, image):
     """
@@ -188,12 +232,56 @@ def plot_entropy_distribution(nearest_distances, num_bins=50):
     plt.grid(True)
     plt.show()
 
+def filter_points_by_class(pcd, class_label):
+    indices = np.where(pcd.semantic_labels == class_label)[0]
+    filtered_pcd = pcd.select_by_index(indices)
+    return filtered_pcd
+
+def apply_color_map( predictions):
+    """Maps prediction labels to their respective CATEGORY_COLORS"""
+    height, width = predictions.shape
+    color_mask = np.zeros((height, width, 3), dtype=np.uint8)
+
+    for label, (color, name) in CATEGORY_COLORS.items():
+        color_mask[predictions == label] = color  # Assign RGB color
+
+    return color_mask
+
+def semantic_segmentation_inference(image, model, processor):
+    """Run semantic segmentation inference using Segformer model."""
+    original_height, original_width = image.shape[:2]
+    
+    # Convert image to PIL for processing
+    image_pil = Image.fromarray(image)
+
+    # Process image with Segformer processor
+    pixel_values = processor(images=image_pil, return_tensors="pt").pixel_values.to(device)
+
+    # Run inference
+    with torch.no_grad():
+        outputs = model(pixel_values=pixel_values)
+
+    print("Semantic Segmentation inference done!")
+
+    # Get predictions
+    logits = outputs.logits
+    predictions = logits.argmax(dim=1).squeeze().cpu().numpy()  # Get highest probability class
+
+    # **Resize segmentation predictions back to original image size**
+    predictions_resized = cv2.resize(predictions, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
+
+    # Convert predictions to colored mask
+    color_mask = apply_color_map(predictions_resized)
+    print("Color Map applied")
+
+    return predictions_resized, color_mask
 
 
 if __name__=="__main__":
     # Paths to ROS bags and output file
     lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR.bag"
     odometry_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR_trajectory.bag"
+    original_bag_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR_images/images"
     output_pcd_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_filtered.ply"
     output_trajectory_pcd_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_trajectory.ply"
     lidar_topic = "/VLP32/velodyne_points"
@@ -201,20 +289,42 @@ if __name__=="__main__":
     odometry_topic = "/lio_sam/mapping/odometry"
     output_txt_dir = "30_bridgecurve_80m_100kmph_BTUwDLR"
 
+    trained_models_Save_path = "/home/knadmin/Ashwin/Semantic_labelled_by_Lukas_Hosch/trained_models"
+    model_name = "segformer-best_6classes_aug_adjustable_lr_customweights"
+    model_save_path = os.path.join(trained_models_Save_path,model_name)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    processor = SegformerImageProcessor.from_pretrained("nvidia/mit-b0")
+    # Load the best saved model before inference
+    model = SegformerForSemanticSegmentation.from_pretrained(model_save_path).to(device)
+    model.eval()  # Ensure model is in evaluation mode
+    model.to(device)
+    CATEGORY_COLORS = {
+    0: ([135, 206, 250], "Sky"),        # Sky
+    1: ([0, 191, 255], "Water"),          # Water
+    2: ([50, 205, 50], "Vegetation"),     # Vegetation
+    3: ([34, 139, 34], "Riverbank"),       # Riverbank
+    4: ([184, 134, 11], "Bridge"),        # Bridge
+    5: ([157, 0, 255], "Other")         # Other
+    }
+
+
     trajectory_flag = True
-    apply_ransac_flag = True
-    compute_map_entropy_flag = True
-    downsample_pcd_flag = True
+    apply_ransac_flag = False
+    compute_map_entropy_flag = False
+    downsample_pcd_flag = False
+    save_images_flag = False
 
     frame_count = 0  # Counter for frame-based naming
 
     if os.path.exists(output_txt_dir):
         shutil.rmtree(output_txt_dir)  
     os.makedirs(output_txt_dir, exist_ok=True)  # Create new empty folder
+    os.makedirs(original_bag_images_dump_folder, exist_ok=True)
 
-    cv2.namedWindow("Display_Image", cv2.WINDOW_NORMAL) 
-    cv2.namedWindow("Display_Image2", cv2.WINDOW_NORMAL) 
-
+    cv2.namedWindow("Original Image with lidar points in red projected", cv2.WINDOW_NORMAL) 
+    cv2.namedWindow("Only Lidar points with Photo colour", cv2.WINDOW_NORMAL) 
+    cv2.namedWindow("Semantic Image", cv2.WINDOW_NORMAL) 
+    cv2.namedWindow("Alpha Blended Image",cv2.WINDOW_NORMAL)
 
     # LiDAR to Camera Transformation Matrix
     R = np.array([[-0.0086, 0.0068, 0.9999],
@@ -256,12 +366,17 @@ if __name__=="__main__":
 
 
     points_counter =0
+    image_counter = 0
 
     for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
         timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
         
         if topic == image_topic:
             image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+            image_counter+=1
+            if save_images_flag:
+                img_path = os.path.join(original_bag_images_dump_folder,"image_{}.png".format(timestamp))
+                cv2.imwrite(img_path,image)
             continue  # Store the latest image and move on
         
         if topic == lidar_topic and image is not None:
@@ -318,15 +433,24 @@ if __name__=="__main__":
                 image_with_red[y_start:y_end, x_start:x_end] = [0, 0, 255]  # Red color
                 mask[y_start:y_end, x_start:x_end] = 255  # White mask
 
-            colored_points_rgb, valid_indices  = colorize_point_cloud(lidar_points, image, transformed_points)
+            # colored_points_rgb, valid_indices  = colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points)
+
+            #code part to run inference of semantic segmentation
+            semantic_predictions, semantic_color_mask = semantic_segmentation_inference(image, model, processor)
+            semantic_color_mask = cv2.cvtColor(semantic_color_mask, cv2.COLOR_RGB2BGR)
+
 
             #Part of the code to use for using semantic iamge color
-            # colored_points_semantic, valid_indices  = colorize_point_cloud(lidar_points, semantic_image, transformed_points)
+            colored_points_rgb, valid_indices = colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions)
 
+
+            # Overlay segmentation mask on original image
+            alpha = 0.5
+            overlayed_image = cv2.addWeighted(image, 1, semantic_color_mask, alpha, 0)
 
 
             # Save transformed + colorized LiDAR points to TXT
-            save_pointcloud_to_txt(frame_count, transformed_points, colored_points_rgb, valid_indices, timestamp, lidar_points)
+            # save_pointcloud_to_txt(frame_count, transformed_points, colored_points_rgb, valid_indices, timestamp, lidar_points)
 
             frame_count += 1  # Increment frame count
             
@@ -397,8 +521,12 @@ if __name__=="__main__":
             intensity_list.append(intensity)
             ring_list.append(ring)
 
-            cv2.imshow("Display_Image", image_with_red) 
-            cv2.imshow("Display_Image2", black_image) 
+
+
+            cv2.imshow("Original Image with lidar points in red projected",image_with_red) 
+            cv2.imshow("Only Lidar points with Photo colour", black_image) 
+            cv2.imshow("Semantic Image", semantic_color_mask) 
+            cv2.imshow("Alpha Blended Image", overlayed_image) 
             cv2.waitKey(50) 
 
 
@@ -413,15 +541,16 @@ if __name__=="__main__":
 
     print(f"Total points saved in final PCD: {pcd_points.shape[0]}")
     print(f"Total points from valid indexes across entire rosbag: {points_counter}")
+    print("image_counter",image_counter)
 
 
     # Create structured Open3D point cloud
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pcd_points)
     pcd.colors = o3d.utility.Vector3dVector(colors_list)
+    # pcd.semantic_labels = np.array([point[6] for point in colored_points_semantic])
 
-
-
+    # car_points = filter_points_by_class(pcd, car_class_label)
 
     if apply_ransac_flag:
         # Apply RANSAC to remove water reflections (ground-like surface)
@@ -456,7 +585,7 @@ if __name__=="__main__":
         o3d.io.write_point_cloud(output_pcd_file, combined_pcd)
         o3d.io.write_point_cloud(output_trajectory_pcd_file, trajectory_pcd)
         # Visualize both LiDAR map and Boat trajectory together
-        o3d.visualization.draw_geometries([pcd, trajectory_pcd], 
+        o3d.visualization.draw_geometries([pcd], 
                                         window_name="3D Map + Boat Trajectory",
                                         point_show_normal=False)
         o3d.visualization.draw_geometries([trajectory_pcd], 
