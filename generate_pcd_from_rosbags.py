@@ -59,40 +59,50 @@ def colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points)
     print("Successfully colorized {} points.".format(len(colored_points)))
     return colored_points, valid_indices
 
-def colorize_point_cloud_semantic(lidar_points, image, transformed_points,semantic_image):
-    """Colorize the point cloud based on the image colors with correct RGB values."""
-    print("Colorizing the point cloud with RGB values.")
+def colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions):
+    """Colorize the point cloud based on the semantic segmentation mask and store class labels."""
+    print("Colorizing the point cloud using semantic segmentation.")
 
     Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
-    
-    # Step 1: Find valid points that are in front of the camera (Z > 0)
-    valid_indices = np.where(Zc > 0)[0]  # Get indices directly to maintain order
+
+    # Step 1: Keep only forward-facing points
+    valid_indices = np.where(Zc > 0)[0]  
     Xc, Yc, Zc = Xc[valid_indices], Yc[valid_indices], Zc[valid_indices]
 
-    # Step 2: Project the valid points into the image plane
+    # Step 2: Project points into 2D image (original resolution)
     x_proj = (camera_intrinsics["fx"] * Xc / Zc + camera_intrinsics["cx"]).astype(int)
     y_proj = (camera_intrinsics["fy"] * Yc / Zc + camera_intrinsics["cy"]).astype(int)
 
+    # Step 3: Find points inside the original image bounds
+    img_h, img_w = image.shape[:2]  # Get original image size
+    inside_image = (x_proj >= 0) & (x_proj < img_w) & (y_proj >= 0) & (y_proj < img_h)
 
-    # Step 3: Find points that fall within the image bounds
-    inside_image = (x_proj >= 0) & (x_proj < image.shape[1]) & (y_proj >= 0) & (y_proj < image.shape[0])
-    
-    # Step 4: Apply the mask to retain only valid points (ensuring order is kept)
     valid_indices = valid_indices[inside_image]
     x_proj, y_proj = x_proj[inside_image], y_proj[inside_image]
 
-    # Step 4: Extract semantic labels
+    # **Use semantic predictions to get class labels**
     semantic_labels = semantic_predictions[y_proj, x_proj]  # Get semantic class at projection
 
-    # Step 5: Assign RGB color from category colors
-    colored_points = [
-        (lidar_points[i][0], lidar_points[i][1], lidar_points[i][2], 
-         *CATEGORY_COLORS[int(semantic_labels[j])][0])  # Convert label to RGB color
-        for j, i in enumerate(valid_indices)
-    ]
+    # Step 4: Assign RGB color from category colors & store class labels
+    colored_points = []
+    class_labels = []
+
+    for j, i in enumerate(valid_indices):
+        class_id = int(semantic_labels[j])  # Get class label
+        color = CATEGORY_COLORS[class_id][0]  # Get color from CATEGORY_COLORS
+
+        # Store point + color
+        colored_points.append((
+            lidar_points[i][0], lidar_points[i][1], lidar_points[i][2], 
+            color[0], color[1], color[2]
+        ))
+
+        # Store class label separately
+        class_labels.append(class_id)
 
     print(f"Successfully colorized {len(colored_points)} points using semantic segmentation.")
-    return colored_points, valid_indices
+    return colored_points, class_labels, valid_indices
+
 
     
 
@@ -276,6 +286,26 @@ def semantic_segmentation_inference(image, model, processor):
 
     return predictions_resized, color_mask
 
+def filter_pcd_by_class(pcd, class_labels_file, selected_classes):
+    """
+    Filter points in the point cloud based on selected semantic classes.
+    :param pcd: Open3D Point Cloud
+    :param class_labels_file: Path to saved class labels `.npy` file
+    :param selected_classes: List of class indices to keep
+    :return: Filtered point cloud
+    """
+    class_labels = np.load(class_labels_file)  # Load class labels
+    class_labels = class_labels.flatten()  # Ensure it's 1D
+
+    # Get indices of points belonging to selected classes
+    indices = np.where(np.isin(class_labels, selected_classes))[0]
+
+    # Create filtered point cloud
+    filtered_pcd = pcd.select_by_index(indices)
+    print(f"✅ Filtered PCD contains {len(indices)} points from selected classes {selected_classes}.")
+    
+    return filtered_pcd
+
 
 if __name__=="__main__":
     # Paths to ROS bags and output file
@@ -361,6 +391,7 @@ if __name__=="__main__":
     semantic_colors_list = []
     intensity_list = []
     ring_list = []
+    class_labels_list = []
 
     lidar_bag = rosbag.Bag(lidar_bag_path, "r")
     image = None  # Initialize image storage
@@ -447,8 +478,9 @@ if __name__=="__main__":
             print("Per Frame inference Time",frame_inference_duration)
 
             #Part of the code to use for using semantic iamge color
-            colored_points_semantic, valid_indices = colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions)
-
+            colored_points_semantic, class_labels, valid_indices = colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions)
+            # class_labels_array = np.array(class_labels).reshape(-1, 1)
+            
 
             # Overlay segmentation mask on original image
             alpha = 0.5
@@ -529,6 +561,7 @@ if __name__=="__main__":
             photo_colors_list.append(photo_colors)
             intensity_list.append(intensity)
             ring_list.append(ring)
+            class_labels_list.extend(class_labels) 
 
 
 
@@ -548,6 +581,8 @@ if __name__=="__main__":
     photo_colors_list = np.vstack(photo_colors_list)
     intensity_list = np.hstack(intensity_list)[:, None]  # Ensure correct shape
     ring_list = np.hstack(ring_list)[:, None]
+    class_labels_array = np.array(class_labels_list).reshape(-1, 1)
+
 
     print(f"Total points saved in final PCD: {pcd_points.shape[0]}")
     print(f"Total points from valid indexes across entire rosbag: {points_counter}")
@@ -558,6 +593,9 @@ if __name__=="__main__":
     pcd_semantic = o3d.geometry.PointCloud()
     pcd_semantic.points = o3d.utility.Vector3dVector(pcd_points)
     pcd_semantic.colors = o3d.utility.Vector3dVector(semantic_colors_list)
+    # pcd_semantic.class_labels = class_labels_array 
+    
+
 
     pcd_photo = o3d.geometry.PointCloud()
     pcd_photo.points = o3d.utility.Vector3dVector(pcd_points)
@@ -601,7 +639,12 @@ if __name__=="__main__":
 
         o3d.io.write_point_cloud(output_pcd_semantic_file, combined_pcd_semantic)
         o3d.io.write_point_cloud(output_trajectory_pcd_file, trajectory_pcd)
+        np.save("class_labels.npy", class_labels_array)
         # Visualize both LiDAR map and Boat trajectory together
+
+
+
+
         o3d.visualization.draw_geometries([pcd_semantic], 
                                         window_name="Semantic 3D Map + Boat Trajectory",
                                         point_show_normal=False)
@@ -611,6 +654,17 @@ if __name__=="__main__":
         o3d.visualization.draw_geometries([trajectory_pcd], 
                                         window_name="Boat Trajectory",
                                         point_show_normal=False)
+        
+        selected_classes = [1, 2, 4]  # Example: Keep only Water, Vegetation, and Bridge
+
+        # ✅ Filter only selected classes and save separately
+        filtered_pcd = filter_pcd_by_class(pcd_semantic, "class_labels.npy", selected_classes)
+        o3d.visualization.draw_geometries([filtered_pcd], 
+                                        window_name="Filtered Pointcloud",
+                                        point_show_normal=False)
+        o3d.io.write_point_cloud("filtered_pcd.ply", filtered_pcd)
+        print("✅ Filtered PCD saved as filtered_pcd.ply")
+
     else:
         o3d.io.write_point_cloud(output_pcd_semantic_file, pcd_semantic)
         # Visualize the final point cloud
