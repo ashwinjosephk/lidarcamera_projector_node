@@ -309,16 +309,40 @@ def filter_pcd_by_class(pcd, class_labels_file, selected_classes):
 
 if __name__=="__main__":
     # Paths to ROS bags and output file
-    lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR.bag"
-    odometry_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR_trajectory.bag"
-    original_bag_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/30_bridgecurve_80m_100kmph_BTUwDLR_images/images"
-    output_pcd_semantic_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_semantic.ply"
-    output_pcd_photo_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_photo.ply"
-    output_trajectory_pcd_file = "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_trajectory.ply"
+
+    '''
+    Filenames:
+    7_anlegen_80m_100kmph_BTUwDLR
+    9_anlegen_80m_100kmph_BTUwDLR
+    17_straight_200m_100kmph_BTUwDLR
+    29_bridgecurve_80m_100kmph_BTUwDLR
+    30_bridgecurve_80m_100kmph_BTUwDLR
+    37_curvepromenade_160m_100kmph_BTUwDLR
+    53_schleuseeinfahrt_20m_100kmph_BTUwDLR
+
+    '''
+
+
+    lidar_bag_base_name = "17_straight_200m_100kmph_BTUwDLR"
+
+    #Paths
+    lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}.bag".format(lidar_bag_base_name,lidar_bag_base_name)
+    odometry_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_trajectory.bag".format(lidar_bag_base_name,lidar_bag_base_name)
+    original_bag_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_images/images".format(lidar_bag_base_name,lidar_bag_base_name)
+    output_txt_dir = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}".format(lidar_bag_base_name)
+
+    output_folder = os.path.join(output_txt_dir,"output_pcd")
+    os.makedirs(output_folder, exist_ok=True)
+    output_pcd_semantic_file = "{}/{}_trajectory_output_map_semantic.ply".format(output_folder,lidar_bag_base_name)
+    output_pcd_photo_file = "{}/{}_trajectory_output_map_photo.ply".format(output_folder,lidar_bag_base_name)
+    output_trajectory_pcd_file = "{}/{}_trajectory_output_map_trajectory.ply".format(output_folder,lidar_bag_base_name)
+    filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
+
+    #TOpic names
     lidar_topic = "/VLP32/velodyne_points"
     image_topic = "/zed2i/zed_node/left/image_rect_color/compressed"
     odometry_topic = "/lio_sam/mapping/odometry"
-    output_txt_dir = "30_bridgecurve_80m_100kmph_BTUwDLR"
+    
 
     trained_models_Save_path = "/home/knadmin/Ashwin/Semantic_labelled_by_Lukas_Hosch/trained_models"
     model_name = "segformer-best_6classes_aug_adjustable_lr_customweights"
@@ -347,10 +371,10 @@ if __name__=="__main__":
 
     frame_count = 0  # Counter for frame-based naming
 
-    if os.path.exists(output_txt_dir):
-        shutil.rmtree(output_txt_dir)  
+    # if os.path.exists(output_txt_dir):
+    #     shutil.rmtree(output_txt_dir)  
     os.makedirs(output_txt_dir, exist_ok=True)  # Create new empty folder
-    os.makedirs(original_bag_images_dump_folder, exist_ok=True)
+    
 
     cv2.namedWindow("Original Image with lidar points in red projected", cv2.WINDOW_NORMAL) 
     cv2.namedWindow("Only Lidar points with Photo colour", cv2.WINDOW_NORMAL) 
@@ -408,6 +432,7 @@ if __name__=="__main__":
             image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
             image_counter+=1
             if save_images_flag:
+                os.makedirs(original_bag_images_dump_folder, exist_ok=True)
                 img_path = os.path.join(original_bag_images_dump_folder,"image_{}.png".format(timestamp))
                 cv2.imwrite(img_path,image)
             continue  # Store the latest image and move on
@@ -638,6 +663,7 @@ if __name__=="__main__":
     if trajectory_flag:
 
         o3d.io.write_point_cloud(output_pcd_semantic_file, combined_pcd_semantic)
+        o3d.io.write_point_cloud(output_pcd_photo_file, combined_pcd_photo)
         o3d.io.write_point_cloud(output_trajectory_pcd_file, trajectory_pcd)
         np.save("class_labels.npy", class_labels_array)
         # Visualize both LiDAR map and Boat trajectory together
@@ -649,7 +675,7 @@ if __name__=="__main__":
                                         window_name="Semantic 3D Map + Boat Trajectory",
                                         point_show_normal=False)
         o3d.visualization.draw_geometries([pcd_photo], 
-                                        window_name="Semantic 3D Map + Boat Trajectory",
+                                        window_name="Photorealistic Map + Boat Trajectory",
                                         point_show_normal=False)
         o3d.visualization.draw_geometries([trajectory_pcd], 
                                         window_name="Boat Trajectory",
@@ -662,13 +688,14 @@ if __name__=="__main__":
         o3d.visualization.draw_geometries([filtered_pcd], 
                                         window_name="Filtered Pointcloud",
                                         point_show_normal=False)
-        o3d.io.write_point_cloud("filtered_pcd.ply", filtered_pcd)
+        o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
         print("✅ Filtered PCD saved as filtered_pcd.ply")
 
     else:
         o3d.io.write_point_cloud(output_pcd_semantic_file, pcd_semantic)
+        o3d.io.write_point_cloud(output_pcd_photo_file, pcd_photo)
         # Visualize the final point cloud
-        o3d.visualization.draw_geometries([pcd_semantic], window_name="Photorealistic 3D Map (Not yet)",
+        o3d.visualization.draw_geometries([pcd_semantic], window_name="Photorealistic 3D Map",
                                         point_show_normal=False)
 
     lidar_bag.close()
