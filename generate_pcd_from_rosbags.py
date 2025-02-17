@@ -286,7 +286,7 @@ def semantic_segmentation_inference(image, model, processor):
 
     return predictions_resized, color_mask
 
-def filter_pcd_by_class(pcd, class_labels_file, selected_classes):
+def filter_pcd_by_class(pcd, class_labels_file, selected_classes, CATEGORY_COLORS):
     """
     Filter points in the point cloud based on selected semantic classes.
     :param pcd: Open3D Point Cloud
@@ -302,9 +302,55 @@ def filter_pcd_by_class(pcd, class_labels_file, selected_classes):
 
     # Create filtered point cloud
     filtered_pcd = pcd.select_by_index(indices)
-    print(f"✅ Filtered PCD contains {len(indices)} points from selected classes {selected_classes}.")
+
+    selected_class_names = [CATEGORY_COLORS[i][1] for i in selected_classes if i in CATEGORY_COLORS]
+
+    print(f"✅ Filtered PCD contains {len(indices)} points from selected classes {selected_class_names}.")
     
     return filtered_pcd
+
+def compute_depth_from_stereo(left_image, right_image, camera_intrinsics):
+    """
+    Compute a depth image from stereo images using OpenCV's StereoSGBM.
+    :param left_image: Left rectified image (BGR or grayscale)
+    :param right_image: Right rectified image (BGR or grayscale)
+    :param camera_intrinsics: Dictionary with 'fx' (focal length in pixels)
+    :return: Depth image in meters (same size as input images)
+    """
+    baseline = 0.12  # Baseline of ZED2i stereo camera in meters
+
+    # Convert images to grayscale if needed
+    if len(left_image.shape) == 3:
+        left_gray = cv2.cvtColor(left_image, cv2.COLOR_BGR2GRAY)
+        right_gray = cv2.cvtColor(right_image, cv2.COLOR_BGR2GRAY)
+    else:
+        left_gray = left_image
+        right_gray = right_image
+
+    # Stereo matcher settings
+    stereo = cv2.StereoSGBM_create(
+        minDisparity=0,
+        numDisparities=128,  # Must be a multiple of 16
+        blockSize=9,
+        P1=8 * 3 * 9 ** 2,
+        P2=32 * 3 * 9 ** 2,
+        disp12MaxDiff=1,
+        uniquenessRatio=10,
+        speckleWindowSize=100,
+        speckleRange=32
+    )
+
+    # Compute disparity
+    disparity = stereo.compute(left_gray, right_gray).astype(np.float32) / 16.0  # Normalize
+
+    # Avoid division by zero (replace invalid disparity values with small nonzero value)
+    disparity[disparity <= 0] = 0.1
+
+    # Compute depth using Depth = (fx * B) / disparity
+    depth = (camera_intrinsics["fx"] * baseline) / disparity
+
+    return depth
+
 
 
 if __name__=="__main__":
@@ -323,7 +369,7 @@ if __name__=="__main__":
     '''
 
 
-    lidar_bag_base_name = "17_straight_200m_100kmph_BTUwDLR"
+    lidar_bag_base_name = "53_schleuseeinfahrt_20m_100kmph_BTUwDLR"
 
     #Paths
     lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}.bag".format(lidar_bag_base_name,lidar_bag_base_name)
@@ -340,7 +386,8 @@ if __name__=="__main__":
 
     #TOpic names
     lidar_topic = "/VLP32/velodyne_points"
-    image_topic = "/zed2i/zed_node/left/image_rect_color/compressed"
+    left_image_topic = "/zed2i/zed_node/left/image_rect_color/compressed"
+    right_image_topic = "/zed2i/zed_node/right/image_rect_color/compressed"
     odometry_topic = "/lio_sam/mapping/odometry"
     
 
@@ -361,7 +408,7 @@ if __name__=="__main__":
     4: ([184, 134, 11], "Bridge"),        # Bridge
     5: ([157, 0, 255], "Other")         # Other
     }
-
+    selected_classes = [1, 2, 4]  #for filtering specific classes in the filtered pointcloud
 
     trajectory_flag = True
     apply_ransac_flag = False
@@ -375,11 +422,13 @@ if __name__=="__main__":
     #     shutil.rmtree(output_txt_dir)  
     os.makedirs(output_txt_dir, exist_ok=True)  # Create new empty folder
     
-
+    # cv2.namedWindow("Original left Camera Image",cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Original right Camera Image",cv2.WINDOW_NORMAL)
     cv2.namedWindow("Original Image with lidar points in red projected", cv2.WINDOW_NORMAL) 
     cv2.namedWindow("Only Lidar points with Photo colour", cv2.WINDOW_NORMAL) 
     cv2.namedWindow("Semantic Image", cv2.WINDOW_NORMAL) 
     cv2.namedWindow("Alpha Blended Image",cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Depth Image",cv2.WINDOW_NORMAL)
 
     # LiDAR to Camera Transformation Matrix
     R = np.array([[-0.0086, 0.0068, 0.9999],
@@ -418,33 +467,55 @@ if __name__=="__main__":
     class_labels_list = []
 
     lidar_bag = rosbag.Bag(lidar_bag_path, "r")
-    image = None  # Initialize image storage
-
-
+    left_image = None  # Initialize image storage
+    right_image = None  # Initialize image storage
+    depth_image = None
 
     points_counter =0
     image_counter = 0
 
-    for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, image_topic]):
+    for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, left_image_topic, right_image_topic]):
         timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
+        topic_info = lidar_bag.get_type_and_topic_info()
+        total_lidar_messages = topic_info.topics[lidar_topic].message_count
+
         
-        if topic == image_topic:
-            image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+        if topic == left_image_topic:
+            left_image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
             image_counter+=1
+            # cv2.imshow("Original left Camera Image", left_image)
             if save_images_flag:
                 os.makedirs(original_bag_images_dump_folder, exist_ok=True)
                 img_path = os.path.join(original_bag_images_dump_folder,"image_{}.png".format(timestamp))
-                cv2.imwrite(img_path,image)
+                cv2.imwrite(img_path,left_image)
             continue  # Store the latest image and move on
+
+        if topic == right_image_topic:
+            right_image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+            print("right_image.shape",right_image.shape)
+            cv2.imshow("Original right Camera Image", right_image)
+            # Ensure we have both left and right images before computing depth
+            if left_image is not None:
+                depth_image = compute_depth_from_stereo(left_image, right_image, camera_intrinsics)
+                print("depth image computed")
+
+                # Normalize depth for visualization (convert meters to grayscale)
+                depth_vis = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)  # Use JET colormap for better visualization
+                print("depth image colored")
+
+                # Show the depth image
+                cv2.imshow("Depth Image", depth_colored)
+                # cv2.waitKey(1)
         
-        if topic == lidar_topic and image is not None:
+        if topic == lidar_topic and left_image is not None:
             # Find the closest odometry timestamp
             closest_idx = np.argmin(np.abs(np.array(odometry_timestamps) - timestamp))
             closest_time, position, orientation = odometry_data[closest_idx]
 
             frame_inference_start_time = time.time()
             print("**************************")
-            print("Frame counter", frame_count)
+            print("Frame counter: {}/{}".format(frame_count,total_lidar_messages))
             
             print(f"Processing LiDAR at {timestamp} -> Closest odometry at {closest_time} (Δt = {abs(closest_time - timestamp):.3f}s)")
             
@@ -476,26 +547,26 @@ if __name__=="__main__":
 
 
             #checking if projected 2d points are within image boundary
-            valid_points = (x_proj >= 0) & (x_proj < image.shape[1]) & (y_proj >= 0) & (y_proj < image.shape[0])
+            valid_points = (x_proj >= 0) & (x_proj < left_image.shape[1]) & (y_proj >= 0) & (y_proj < left_image.shape[0])
             count_trues_projected = np.sum(valid_points)
             print("Number of valid points after using points within image {} (and after z axes filtering)".format(count_trues_projected))
 
             x_proj, y_proj = x_proj[valid_points], y_proj[valid_points]
 
             # 1️⃣ Create the original image with red-projected points
-            mask = np.zeros(image.shape[:2], dtype=np.uint8)
-            image_with_red = image.copy()
+            mask = np.zeros(left_image.shape[:2], dtype=np.uint8)
+            image_with_red = left_image.copy()
             point_size = 2
             for x, y in zip(x_proj, y_proj):
-                x_start, x_end = max(0, x - point_size), min(image.shape[1], x + point_size + 1)
-                y_start, y_end = max(0, y - point_size), min(image.shape[0], y + point_size + 1)
+                x_start, x_end = max(0, x - point_size), min(left_image.shape[1], x + point_size + 1)
+                y_start, y_end = max(0, y - point_size), min(left_image.shape[0], y + point_size + 1)
                 image_with_red[y_start:y_end, x_start:x_end] = [0, 0, 255]  # Red color
                 mask[y_start:y_end, x_start:x_end] = 255  # White mask
 
-            colored_points_photo, valid_indices  = colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points)
+            colored_points_photo, valid_indices  = colorize_point_cloud_photorealisitc(lidar_points, left_image, transformed_points)
 
             #code part to run inference of semantic segmentation
-            semantic_predictions, semantic_color_mask = semantic_segmentation_inference(image, model, processor)
+            semantic_predictions, semantic_color_mask = semantic_segmentation_inference(left_image, model, processor)
             semantic_color_mask = cv2.cvtColor(semantic_color_mask, cv2.COLOR_RGB2BGR)
 
             frame_inference_end_time = time.time()
@@ -503,13 +574,13 @@ if __name__=="__main__":
             print("Per Frame inference Time",frame_inference_duration)
 
             #Part of the code to use for using semantic iamge color
-            colored_points_semantic, class_labels, valid_indices = colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions)
+            colored_points_semantic, class_labels, valid_indices = colorize_point_cloud_semantic(lidar_points, left_image, transformed_points, semantic_predictions)
             # class_labels_array = np.array(class_labels).reshape(-1, 1)
             
 
             # Overlay segmentation mask on original image
             alpha = 0.5
-            overlayed_image = cv2.addWeighted(image, 1, semantic_color_mask, alpha, 0)
+            overlayed_image = cv2.addWeighted(left_image, 1, semantic_color_mask, alpha, 0)
 
 
             # Save transformed + colorized LiDAR points to TXT
@@ -526,7 +597,7 @@ if __name__=="__main__":
             points_counter += len(valid_indices)
             # import pdb;pdb.set_trace()
 
-            black_image = overlay_points_on_black_image(x_proj, y_proj, image)
+            black_image = overlay_points_on_black_image(x_proj, y_proj, left_image)
 
 
             #part related to creating pointcloud
@@ -681,10 +752,10 @@ if __name__=="__main__":
                                         window_name="Boat Trajectory",
                                         point_show_normal=False)
         
-        selected_classes = [1, 2, 4]  # Example: Keep only Water, Vegetation, and Bridge
+        
 
         # ✅ Filter only selected classes and save separately
-        filtered_pcd = filter_pcd_by_class(pcd_semantic, "class_labels.npy", selected_classes)
+        filtered_pcd = filter_pcd_by_class(pcd_semantic, "class_labels.npy", selected_classes,CATEGORY_COLORS)
         o3d.visualization.draw_geometries([filtered_pcd], 
                                         window_name="Filtered Pointcloud",
                                         point_show_normal=False)
