@@ -351,7 +351,41 @@ def compute_depth_from_stereo(left_image, right_image, camera_intrinsics):
 
     return depth
 
+# Function to combine all images and Open3D rendering
+def combine_visualization(open3d_vis, image1, image2, image3, image4, image5):
+    """
+    Combines OpenCV images and Open3D visualization into a single window.
+    """
+    # Read Open3D rendered image (offscreen rendering)
+    open3d_vis.poll_events()
+    open3d_vis.update_renderer()
+    
+    # Capture the Open3D rendering
+    render = open3d_vis.capture_screen_float_buffer(do_render=True)
+    render_np = (np.asarray(render) * 255).astype(np.uint8)  # Convert to OpenCV format
+    render_np = cv2.cvtColor(render_np, cv2.COLOR_RGB2BGR)  # Convert RGB -> BGR for OpenCV
 
+    # Resize Open3D rendering to match image sizes
+    target_size = (image1.shape[1], image1.shape[0])  # Match OpenCV images
+    render_resized = cv2.resize(render_np, target_size)
+
+    # Horizontally stack the first row (Image 1, Image 2, Image 3)
+    top_row = cv2.hconcat([image1, image2, image3])
+
+    # Horizontally stack the second row (Image 4, Image 5, Open3D Render)
+    bottom_row = cv2.hconcat([image4, image5, render_resized])
+
+    # Stack both rows vertically
+    final_combined = cv2.vconcat([top_row, bottom_row])
+
+    # Resize to match video dimensions
+    final_combined_resized = cv2.resize(final_combined, (frame_width, frame_height))
+
+    # Write to video file
+    video_writer.write(final_combined_resized)
+
+    # Show the final unified visualization
+    cv2.imshow("Unified Visualization", final_combined_resized)
 
 if __name__=="__main__":
     # Paths to ROS bags and output file
@@ -375,10 +409,10 @@ if __name__=="__main__":
 
 
 
-    # if 1:
-    #     lidar_bag_base_name = "30_bridgecurve_80m_100kmph_BTUwDLR"
+    if 1:
+        lidar_bag_base_name = "30_bridgecurve_80m_100kmph_BTUwDLR"
 
-    for lidar_bag_base_name in lidar_bags_base_name_list:
+    # for lidar_bag_base_name in lidar_bags_base_name_list:
 
         #Paths
         lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}.bag".format(lidar_bag_base_name,lidar_bag_base_name)
@@ -392,6 +426,13 @@ if __name__=="__main__":
         output_pcd_photo_file = "{}/{}_trajectory_output_map_photo.ply".format(output_folder,lidar_bag_base_name)
         output_trajectory_pcd_file = "{}/{}_trajectory_output_map_trajectory.ply".format(output_folder,lidar_bag_base_name)
         filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename = "{}/{}_combined_view_points.mp4".format(output_folder,lidar_bag_base_name)
+
+        frame_width = 1920  # Adjust according to final window size
+        frame_height = 720
+        fps = 10  # Frames per second
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use 'XVID' for .avi or 'mp4v' for .mp4
+        video_writer = cv2.VideoWriter(save_combined_window_video_filename, fourcc, fps, (frame_width, frame_height))
 
         #TOpic names
         lidar_topic = "/VLP32/velodyne_points"
@@ -438,6 +479,7 @@ if __name__=="__main__":
         cv2.namedWindow("Only Lidar points with Photo colour", cv2.WINDOW_NORMAL) 
         cv2.namedWindow("Semantic Image", cv2.WINDOW_NORMAL) 
         cv2.namedWindow("Alpha Blended Image",cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Unified Visualization",cv2.WINDOW_NORMAL)
         # cv2.namedWindow("Depth Image",cv2.WINDOW_NORMAL)
 
         # LiDAR to Camera Transformation Matrix
@@ -715,20 +757,21 @@ if __name__=="__main__":
 
 
 
-                if len(new_points) > 0:
-                    pcd_live.points = o3d.utility.Vector3dVector(np.vstack(pcd_points))
+                # if len(new_points) > 0:
+                pcd_live.points = o3d.utility.Vector3dVector(np.vstack(pcd_points))
 
-                    print("len(pcd_live.points)",len(pcd_live.points))
-                    # pcd_live.colors.extend(semantic_colors)
-                    pcd_live.colors = o3d.utility.Vector3dVector(np.vstack(semantic_colors_list))
-                    
+                print("len(pcd_live.points)",len(pcd_live.points))
+                # pcd_live.colors.extend(semantic_colors)
+                pcd_live.colors = o3d.utility.Vector3dVector(np.vstack(semantic_colors_list))
+                
+                combine_visualization(vis, left_image, image_with_red, black_image, semantic_color_mask, overlayed_image)
 
 
-                    # import pdb;pdb.set_trace()
-                    vis.update_geometry(pcd_live)
-                    vis.poll_events()
-                    vis.update_renderer()
-                    vis.reset_view_point(True) 
+                # import pdb;pdb.set_trace()
+                vis.update_geometry(pcd_live)
+                vis.poll_events()
+                vis.update_renderer()
+                vis.reset_view_point(True) 
 
 
                 cv2.imshow("Original Image with lidar points in red projected",image_with_red) 
