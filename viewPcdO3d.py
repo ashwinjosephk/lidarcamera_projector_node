@@ -157,6 +157,41 @@ def read_bin_file(bin_path):
         raise RuntimeError(f"Failed to read .bin file at {bin_path}. Error: {str(e)}")
 
 
+def filter_pcd_by_class(pcd, class_labels_file, selected_classes, CATEGORY_COLORS):
+    """
+    Filter points in the point cloud based on selected semantic classes.
+    :param pcd: Open3D Point Cloud
+    :param class_labels_file: Path to saved class labels `.npy` file
+    :param selected_classes: List of class indices to keep
+    :return: Filtered point cloud
+    """
+    class_labels = np.load(class_labels_file)  # Load class labels
+    class_labels = class_labels.flatten()  # Ensure it's 1D
+
+    # Get indices of points belonging to selected classes
+    indices = np.where(np.isin(class_labels, selected_classes))[0]
+
+    # Create filtered point cloud
+    filtered_pcd = pcd.select_by_index(indices)
+
+    selected_class_names = [CATEGORY_COLORS[i][1] for i in selected_classes if i in CATEGORY_COLORS]
+
+    print(f"✅ Filtered PCD contains {len(indices)} points from selected classes {selected_class_names}.")
+    
+    return filtered_pcd
+
+def voxel_grid_downsample(pcd, voxel_size=0.2):
+    """
+    Apply voxel grid downsampling to reduce the number of points.
+    :param pcd: Open3D point cloud object
+    :param voxel_size: The size of each voxel (lower values retain more detail)
+    :return: Downsampled point cloud
+    """
+    print(f"Applying Voxel Grid Downsampling with voxel size: {voxel_size}")
+    downsampled_pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+    print(f"Reduced point count from {len(pcd.points)} to {len(downsampled_pcd.points)}")
+    return downsampled_pcd
+
 if __name__ == "__main__":
     try:
         # Load YAML configuration

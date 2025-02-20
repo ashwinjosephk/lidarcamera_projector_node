@@ -8,263 +8,15 @@ import cv2
 import os
 import shutil
 import time
-from scipy.spatial import KDTree
-import matplotlib.pyplot as plt
+
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 import torch
 from PIL import Image
-from viewPcdO3d import visualize_mapcloud
 import yaml
+from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample
+from stereodepth import compute_depth_from_stereo
+from utils import compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
 
-
-# Camera Intrinsics (to be dynamically set instead of hardcoded values)
-camera_intrinsics = {
-    "fx": 1089.8,
-    "fy": 1086,
-    "cx": 1150.3,
-    "cy": 638.8
-}
-
-def load_config(config_path):
-    """Load the YAML configuration."""
-    try:
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load configuration file: {config_path}. Error: {str(e)}")
-    return config
-
-def colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points):
-    """Colorize the point cloud based on the image colors with correct RGB values."""
-    print("Colorizing the point cloud with RGB values.")
-
-    Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
-    
-    # Step 1: Find valid points that are in front of the camera (Z > 0)
-    valid_indices = np.where(Zc > 0)[0]  # Get indices directly to maintain order
-    Xc, Yc, Zc = Xc[valid_indices], Yc[valid_indices], Zc[valid_indices]
-
-    # Step 2: Project the valid points into the image plane
-    x_proj = (camera_intrinsics["fx"] * Xc / Zc + camera_intrinsics["cx"]).astype(int)
-    y_proj = (camera_intrinsics["fy"] * Yc / Zc + camera_intrinsics["cy"]).astype(int)
-
-
-    # Step 3: Find points that fall within the image bounds
-    inside_image = (x_proj >= 0) & (x_proj < image.shape[1]) & (y_proj >= 0) & (y_proj < image.shape[0])
-    
-    # Step 4: Apply the mask to retain only valid points (ensuring order is kept)
-    valid_indices = valid_indices[inside_image]  # Filter indices based on image bounds
-    x_proj, y_proj = x_proj[inside_image], y_proj[inside_image]
-
-    # Step 5: Extract RGB colors
-    colors = image[y_proj, x_proj]
-
-    colored_points = [
-        (lidar_points[i][0], lidar_points[i][1], lidar_points[i][2], 
-        int(colors[j][2]), int(colors[j][1]), int(colors[j][0]))  # Store as BGR
-        for j, i in enumerate(valid_indices)
-    ]
-
-    print("Successfully colorized {} points.".format(len(colored_points)))
-    return colored_points, valid_indices
-
-def colorize_point_cloud_semantic(lidar_points, image, transformed_points, semantic_predictions):
-    """Colorize the point cloud based on the semantic segmentation mask and store class labels."""
-    print("Colorizing the point cloud using semantic segmentation.")
-
-    Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
-
-    # Step 1: Keep only forward-facing points
-    valid_indices = np.where(Zc > 0)[0]  
-    Xc, Yc, Zc = Xc[valid_indices], Yc[valid_indices], Zc[valid_indices]
-
-    # Step 2: Project points into 2D image (original resolution)
-    x_proj = (camera_intrinsics["fx"] * Xc / Zc + camera_intrinsics["cx"]).astype(int)
-    y_proj = (camera_intrinsics["fy"] * Yc / Zc + camera_intrinsics["cy"]).astype(int)
-
-    # Step 3: Find points inside the original image bounds
-    img_h, img_w = image.shape[:2]  # Get original image size
-    inside_image = (x_proj >= 0) & (x_proj < img_w) & (y_proj >= 0) & (y_proj < img_h)
-
-    valid_indices = valid_indices[inside_image]
-    x_proj, y_proj = x_proj[inside_image], y_proj[inside_image]
-
-    # **Use semantic predictions to get class labels**
-    semantic_labels = semantic_predictions[y_proj, x_proj]  # Get semantic class at projection
-
-    # Step 4: Assign RGB color from category colors & store class labels
-    colored_points = []
-    class_labels = []
-
-    for j, i in enumerate(valid_indices):
-        class_id = int(semantic_labels[j])  # Get class label
-        color = CATEGORY_COLORS[class_id][0]  # Get color from CATEGORY_COLORS
-
-        # Store point + color
-        colored_points.append((
-            lidar_points[i][0], lidar_points[i][1], lidar_points[i][2], 
-            color[0], color[1], color[2]
-        ))
-
-        # Store class label separately
-        class_labels.append(class_id)
-
-    print(f"Successfully colorized {len(colored_points)} points using semantic segmentation.")
-    return colored_points, class_labels, valid_indices
-
-
-    
-
-
-def overlay_points_on_black_image(u, v, image):
-    """
-    Draw projected points onto a black image, using the corresponding color from the original image.
-    Publishes the image as a ROS topic.
-    """
-    img_h, img_w, _ = image.shape
-    black_image = np.zeros((img_h, img_w, 3), dtype=np.uint8)  # Create black image
-
-    for i in range(len(u)):
-        u_i = int(u[i])
-        v_i = int(v[i])
-
-        if 0 <= u_i < img_w and 0 <= v_i < img_h:
-            # Get the actual color from the original image at this point
-            color = image[v_i, u_i].tolist()  # Extract RGB color from the image
-            cv2.circle(black_image, (u_i, v_i), 2, color, -1)  # Draw point with same color
-
-    # Convert black image to ROS format and publish
-    print("Published projected LiDAR points onto a black image.")
-    return black_image
-
-def save_pointcloud_to_txt(frame_count, transformed_points, colored_points, valid_indices, timestamp, lidar_points):
-    """Saves the processed colorized LiDAR-to-Camera projected point cloud to a text file."""
-    
-    filename = os.path.join(output_txt_dir, f"{output_txt_dir}_pcd_{frame_count:06d}.txt")
-    
-    # Extract valid LiDAR points, intensity, ring, and time fields
-    filtered_lidar_points = transformed_points[valid_indices]  # Use transformed LiDAR-to-Camera points
-    filtered_intensity = lidar_points[valid_indices, 3]  # Extract intensity
-    filtered_ring = lidar_points[valid_indices, 4]  # Extract ring index
-    filtered_time = lidar_points[valid_indices, 5]  # Extract time within rotation
-
-    with open(filename, "w") as f:
-        for i in range(len(filtered_lidar_points)):
-            x, y, z = filtered_lidar_points[i]  # Use transformed (valid) LiDAR points
-            intensity = filtered_intensity[i]  # Get intensity
-            ring = int(filtered_ring[i])  # Get ring index (integer)
-            time_within_rotation = filtered_time[i]  # Get time within rotation
-            
-            # Extract RGB values
-            _, _, _, r, g, b = colored_points[i]  
-
-            # Save all data in the requested format
-            f.write(f"{x:.6f},{y:.6f},{z:.6f},{intensity:.2f},{ring},{time_within_rotation:.6f},{r},{g},{b}\n")
-
-def generate_boat_trajectory_pcd(odometry_data):
-    """Generate a point cloud representing the boat's trajectory from odometry data."""
-    
-    # Extract only position data from odometry
-    trajectory_points = np.array([data[1] for data in odometry_data])  # XYZ positions of the boat
-
-    # Assign a fixed color (e.g., BLUE [0, 0, 1]) for trajectory points
-    trajectory_colors = np.full((trajectory_points.shape[0], 3), [0, 0, 1])  # Blue color for trajectory
-
-    # Convert to Open3D format
-    trajectory_pcd = o3d.geometry.PointCloud()
-    trajectory_pcd.points = o3d.utility.Vector3dVector(trajectory_points)
-    trajectory_pcd.colors = o3d.utility.Vector3dVector(trajectory_colors.astype(np.float32))
-
-    return trajectory_pcd  # Return the trajectory point cloud
-
-def remove_water_using_ransac(pcd, distance_threshold=0.3, ransac_n=3, num_iterations=1000):
-    """
-    Removes flat surfaces like water using RANSAC plane segmentation.
-    :param pcd: Open3D point cloud object
-    :param distance_threshold: Max distance a point can be from the plane to be considered an inlier
-    :param ransac_n: Number of points used to estimate the plane
-    :param num_iterations: Number of iterations to run RANSAC
-    :return: Filtered point cloud without the detected plane (water)
-    """
-
-    print("Applying RANSAC to remove water reflections...")
-
-    # Segment the dominant plane (likely the water surface)
-    plane_model, inlier_indices = pcd.segment_plane(distance_threshold=distance_threshold,
-                                                    ransac_n=ransac_n,
-                                                    num_iterations=num_iterations)
-    
-    # Extract inliers (plane points) and outliers (remaining points)
-    inlier_cloud = pcd.select_by_index(inlier_indices)  # This contains the plane (water) points
-    outlier_cloud = pcd.select_by_index(inlier_indices, invert=True)  # These are the remaining points
-    
-    print(f"Removed {len(inlier_indices)} points belonging to the water surface.")
-    
-    return outlier_cloud
-
-def voxel_grid_downsample(pcd, voxel_size=0.2):
-    """
-    Apply voxel grid downsampling to reduce the number of points.
-    :param pcd: Open3D point cloud object
-    :param voxel_size: The size of each voxel (lower values retain more detail)
-    :return: Downsampled point cloud
-    """
-    print(f"Applying Voxel Grid Downsampling with voxel size: {voxel_size}")
-    downsampled_pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
-    print(f"Reduced point count from {len(pcd.points)} to {len(downsampled_pcd.points)}")
-    return downsampled_pcd
-
-
-def compute_map_entropy(pcd, num_bins=50):
-    """
-    Compute entropy of a point cloud based on point density.
-    :param pcd: Open3D point cloud object
-    :param num_bins: Number of bins for histogram
-    :return: Entropy value and nearest distance histogram
-    """
-    points = np.asarray(pcd.points)
-
-    # Compute nearest neighbor distances
-    tree = KDTree(points)
-    nearest_distances, _ = tree.query(points, k=2)  # Find nearest neighbor for each point
-    nearest_distances = nearest_distances[:, 1]  # Ignore self-distance
-
-    # Compute histogram of nearest distances
-    hist, bins = np.histogram(nearest_distances, bins=num_bins, density=True)
-
-    # Compute entropy from histogram
-    prob = hist / hist.sum()
-    entropy = -np.sum(prob * np.log2(prob + 1e-9))  # Avoid log(0)
-
-    print(f"Map Entropy: {entropy:.4f}")
-    return entropy, nearest_distances
-
-def plot_entropy_distribution(nearest_distances, num_bins=50):
-    """
-    Plot histogram of nearest neighbor distances to understand entropy.
-    """
-    plt.figure(figsize=(8, 5))
-    plt.hist(nearest_distances, bins=num_bins, color='blue', alpha=0.7, density=True)
-    plt.xlabel("Nearest Neighbor Distance")
-    plt.ylabel("Frequency")
-    plt.title("Distribution of Point Distances (Map Entropy Analysis)")
-    plt.grid(True)
-    plt.show()
-
-def filter_points_by_class(pcd, class_label):
-    indices = np.where(pcd.semantic_labels == class_label)[0]
-    filtered_pcd = pcd.select_by_index(indices)
-    return filtered_pcd
-
-def apply_color_map( predictions):
-    """Maps prediction labels to their respective CATEGORY_COLORS"""
-    height, width = predictions.shape
-    color_mask = np.zeros((height, width, 3), dtype=np.uint8)
-
-    for label, (color, name) in CATEGORY_COLORS.items():
-        color_mask[predictions == label] = color  # Assign RGB color
-
-    return color_mask
 
 def semantic_segmentation_inference(image, model, processor):
     """Run semantic segmentation inference using Segformer model."""
@@ -294,71 +46,6 @@ def semantic_segmentation_inference(image, model, processor):
     print("Color Map applied")
 
     return predictions_resized, color_mask
-
-def filter_pcd_by_class(pcd, class_labels_file, selected_classes, CATEGORY_COLORS):
-    """
-    Filter points in the point cloud based on selected semantic classes.
-    :param pcd: Open3D Point Cloud
-    :param class_labels_file: Path to saved class labels `.npy` file
-    :param selected_classes: List of class indices to keep
-    :return: Filtered point cloud
-    """
-    class_labels = np.load(class_labels_file)  # Load class labels
-    class_labels = class_labels.flatten()  # Ensure it's 1D
-
-    # Get indices of points belonging to selected classes
-    indices = np.where(np.isin(class_labels, selected_classes))[0]
-
-    # Create filtered point cloud
-    filtered_pcd = pcd.select_by_index(indices)
-
-    selected_class_names = [CATEGORY_COLORS[i][1] for i in selected_classes if i in CATEGORY_COLORS]
-
-    print(f"✅ Filtered PCD contains {len(indices)} points from selected classes {selected_class_names}.")
-    
-    return filtered_pcd
-
-def compute_depth_from_stereo(left_image, right_image, camera_intrinsics):
-    """
-    Compute a depth image from stereo images using OpenCV's StereoSGBM.
-    :param left_image: Left rectified image (BGR or grayscale)
-    :param right_image: Right rectified image (BGR or grayscale)
-    :param camera_intrinsics: Dictionary with 'fx' (focal length in pixels)
-    :return: Depth image in meters (same size as input images)
-    """
-    baseline = 0.12  # Baseline of ZED2i stereo camera in meters
-
-    # Convert images to grayscale if needed
-    if len(left_image.shape) == 3:
-        left_gray = cv2.cvtColor(left_image, cv2.COLOR_BGR2GRAY)
-        right_gray = cv2.cvtColor(right_image, cv2.COLOR_BGR2GRAY)
-    else:
-        left_gray = left_image
-        right_gray = right_image
-
-    # Stereo matcher settings
-    stereo = cv2.StereoSGBM_create(
-        minDisparity=0,
-        numDisparities=128,  # Must be a multiple of 16
-        blockSize=9,
-        P1=8 * 3 * 9 ** 2,
-        P2=32 * 3 * 9 ** 2,
-        disp12MaxDiff=1,
-        uniquenessRatio=10,
-        speckleWindowSize=100,
-        speckleRange=32
-    )
-
-    # Compute disparity
-    disparity = stereo.compute(left_gray, right_gray).astype(np.float32) / 16.0  # Normalize
-
-    # Avoid division by zero (replace invalid disparity values with small nonzero value)
-    disparity[disparity <= 0] = 0.1
-
-    # Compute depth using Depth = (fx * B) / disparity
-    depth = (camera_intrinsics["fx"] * baseline) / disparity
-
-    return depth
 
 
 def combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_image): 
@@ -397,26 +84,6 @@ def combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_ima
     # Show the final unified visualization
     cv2.imshow("Unified Visualization", final_combined)
     video_writer.write(final_combined)
-
-
-
-def create_rectangle(min_corner, max_corner, color=[1.0, 1.0, 1.0]):
-    rectangle = o3d.geometry.TriangleMesh()
-    bottom_left = np.array(min_corner)
-    bottom_right = np.array([max_corner[0], min_corner[1], min_corner[2]])
-    top_left = np.array([min_corner[0], max_corner[1], min_corner[2]])
-    top_right = np.array(max_corner)
-
-    rectangle.vertices = o3d.utility.Vector3dVector(
-        [bottom_left, bottom_right, top_left, top_right]
-    )
-
-    rectangle.triangles = o3d.utility.Vector3iVector(
-        [[0, 1, 2], [2, 1, 3]]
-    )
-
-    rectangle.vertex_colors = o3d.utility.Vector3dVector([color] * 4)
-    return rectangle
 
 
 
@@ -461,6 +128,7 @@ if __name__=="__main__":
         output_trajectory_pcd_file = "{}/{}_trajectory_output_map_trajectory.ply".format(output_folder,lidar_bag_base_name)
         filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
         save_combined_window_video_filename = "{}/{}_combined_view_points.mp4".format(output_folder,lidar_bag_base_name)
+        class_labels_dump_filename = "{}/{}_class_labels.npy".format(output_folder,lidar_bag_base_name)
 
         frame_width = 1920  # Adjust according to final window size
         frame_height = 1080
@@ -484,14 +152,8 @@ if __name__=="__main__":
         model = SegformerForSemanticSegmentation.from_pretrained(model_save_path).to(device)
         model.eval()  # Ensure model is in evaluation mode
         model.to(device)
-        CATEGORY_COLORS = {
-        0: ([135, 206, 250], "Sky"),        # Sky
-        1: ([0, 191, 255], "Water"),          # Water
-        2: ([50, 205, 50], "Vegetation"),     # Vegetation
-        3: ([34, 139, 34], "Riverbank"),       # Riverbank
-        4: ([184, 134, 11], "Bridge"),        # Bridge
-        5: ([157, 0, 255], "Other")         # Other
-        }
+        CATEGORY_COLORS = load_category_colors()
+        camera_intrinsics = load_camera_intrinsics()
         selected_classes = [1, 2, 4]  #for filtering specific classes in the filtered pointcloud
 
         trajectory_flag = False
@@ -524,7 +186,7 @@ if __name__=="__main__":
             "point_size": 1.0,  # Fine visualization
             "background_color": [255, 255, 255],  # Black background
             "show_coordinate_frame": False,
-            "point_color_option": "ZCoordinate",  # Color based on Z-coordinate (height/depth)
+            "point_color_option": "Color",  # Color based on Z-coordinate (height/depth)
             "add_horizontal_plane": False,
             "rectangle": {
                 "bottom_left": [0.0, 0.0, -3.0],  # Height for horizontal plane
@@ -781,7 +443,7 @@ if __name__=="__main__":
 
 
                 # Save transformed + colorized LiDAR points to TXT
-                # save_pointcloud_to_txt(frame_count, transformed_points, colored_points_rgb, valid_indices, timestamp, lidar_points)
+                # save_pointcloud_to_txt(frame_count, transformed_points, colored_points_rgb, valid_indices, timestamp, lidar_points, output_txt_dir)
 
                 frame_count += 1  # Increment frame count
                 
@@ -957,7 +619,7 @@ if __name__=="__main__":
             combined_pcd_semantic = pcd_semantic + trajectory_pcd  # Combine both datasets
             combined_pcd_photo = pcd_photo + trajectory_pcd 
 
-
+        np.save(class_labels_dump_filename, class_labels_array)
         end_time = time.time()
         time_taken = end_time - start_time
         print("Total TIme taken",time_taken)
@@ -973,7 +635,7 @@ if __name__=="__main__":
                 o3d.io.write_point_cloud(output_pcd_semantic_file, combined_pcd_semantic)
                 o3d.io.write_point_cloud(output_pcd_photo_file, combined_pcd_photo)
                 o3d.io.write_point_cloud(output_trajectory_pcd_file, trajectory_pcd)
-                np.save("class_labels.npy", class_labels_array)
+                
                 # Visualize both LiDAR map and Boat trajectory together
 
 
@@ -992,7 +654,7 @@ if __name__=="__main__":
                 
 
                 # ✅ Filter only selected classes and save separately
-                filtered_pcd = filter_pcd_by_class(pcd_semantic, "class_labels.npy", selected_classes,CATEGORY_COLORS)
+                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes,CATEGORY_COLORS)
                 o3d.visualization.draw_geometries([filtered_pcd], 
                                                 window_name="Filtered Pointcloud",
                                                 point_show_normal=False)
@@ -1009,6 +671,7 @@ if __name__=="__main__":
                 config_path = "config/pcd_config.yaml"
                 config = load_config(config_path)    
                 visualize_mapcloud(map_cloud_semantic, config)
+
                 map_cloud_photo = o3d.io.read_point_cloud(output_pcd_photo_file)   
                 config_path = "config/pcd_config.yaml"
                 config = load_config(config_path)    
