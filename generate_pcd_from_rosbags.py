@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 import torch
 from PIL import Image
+from viewPcdO3d import visualize_mapcloud
+import yaml
 
 
 # Camera Intrinsics (to be dynamically set instead of hardcoded values)
@@ -23,7 +25,14 @@ camera_intrinsics = {
     "cy": 638.8
 }
 
-
+def load_config(config_path):
+    """Load the YAML configuration."""
+    try:
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load configuration file: {config_path}. Error: {str(e)}")
+    return config
 
 def colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points):
     """Colorize the point cloud based on the image colors with correct RGB values."""
@@ -351,41 +360,66 @@ def compute_depth_from_stereo(left_image, right_image, camera_intrinsics):
 
     return depth
 
-# Function to combine all images and Open3D rendering
-def combine_visualization(open3d_vis, image1, image2, image3, image4, image5):
+
+def combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_image): 
     """
     Combines OpenCV images and Open3D visualization into a single window.
     """
-    # Read Open3D rendered image (offscreen rendering)
-    open3d_vis.poll_events()
-    open3d_vis.update_renderer()
+    vis_semantic.poll_events()
+    vis_semantic.update_renderer()
+    vis_photo.poll_events()
+    vis_photo.update_renderer()
     
     # Capture the Open3D rendering
-    render = open3d_vis.capture_screen_float_buffer(do_render=True)
-    render_np = (np.asarray(render) * 255).astype(np.uint8)  # Convert to OpenCV format
-    render_np = cv2.cvtColor(render_np, cv2.COLOR_RGB2BGR)  # Convert RGB -> BGR for OpenCV
+    render_semantic = vis_semantic.capture_screen_float_buffer(do_render=True)
+    
+    render_semantic_np = (np.asarray(render_semantic) * 255).astype(np.uint8)
+    
+    render_semantic_np = cv2.cvtColor(render_semantic_np, cv2.COLOR_RGB2BGR)  # Fix RGB to BGR conversion
 
-    # Resize Open3D rendering to match image sizes
-    target_size = (image1.shape[1], image1.shape[0])  # Match OpenCV images
-    render_resized = cv2.resize(render_np, target_size)
+    render_photo = vis_photo.capture_screen_float_buffer(do_render=True)
+    render_photo_np = (np.asarray(render_photo) * 255).astype(np.uint8)
+    render_photo_np = cv2.cvtColor(render_photo_np, cv2.COLOR_RGB2BGR)  # Fix RGB to BGR conversion
+    
+    # Resize images to fill the unified visualization window
+    target_size = (frame_width // 2, frame_height // 2)
 
-    # Horizontally stack the first row (Image 1, Image 2, Image 3)
-    top_row = cv2.hconcat([image1, image2, image3])
+    image_with_red_resized = cv2.resize(image_with_red, target_size)
+    overlayed_image_resized = cv2.resize(overlayed_image, target_size)
+    render_semantic_resized = cv2.resize(render_semantic_np, target_size)
+    render_photo_resized = cv2.resize(render_photo_np, target_size)
 
-    # Horizontally stack the second row (Image 4, Image 5, Open3D Render)
-    bottom_row = cv2.hconcat([image4, image5, render_resized])
-
-    # Stack both rows vertically
+    # Create the final combined view
+    top_row = cv2.hconcat([image_with_red_resized, overlayed_image_resized])
+    bottom_row = cv2.hconcat([render_photo_resized, render_semantic_resized])
     final_combined = cv2.vconcat([top_row, bottom_row])
-
-    # Resize to match video dimensions
-    final_combined_resized = cv2.resize(final_combined, (frame_width, frame_height))
-
-    # Write to video file
-    video_writer.write(final_combined_resized)
-
+ 
     # Show the final unified visualization
-    cv2.imshow("Unified Visualization", final_combined_resized)
+    cv2.imshow("Unified Visualization", final_combined)
+    video_writer.write(final_combined)
+
+
+
+def create_rectangle(min_corner, max_corner, color=[1.0, 1.0, 1.0]):
+    rectangle = o3d.geometry.TriangleMesh()
+    bottom_left = np.array(min_corner)
+    bottom_right = np.array([max_corner[0], min_corner[1], min_corner[2]])
+    top_left = np.array([min_corner[0], max_corner[1], min_corner[2]])
+    top_right = np.array(max_corner)
+
+    rectangle.vertices = o3d.utility.Vector3dVector(
+        [bottom_left, bottom_right, top_left, top_right]
+    )
+
+    rectangle.triangles = o3d.utility.Vector3iVector(
+        [[0, 1, 2], [2, 1, 3]]
+    )
+
+    rectangle.vertex_colors = o3d.utility.Vector3dVector([color] * 4)
+    return rectangle
+
+
+
 
 if __name__=="__main__":
     # Paths to ROS bags and output file
@@ -410,7 +444,7 @@ if __name__=="__main__":
 
 
     if 1:
-        lidar_bag_base_name = "30_bridgecurve_80m_100kmph_BTUwDLR"
+        lidar_bag_base_name = "7_anlegen_80m_100kmph_BTUwDLR"
 
     # for lidar_bag_base_name in lidar_bags_base_name_list:
 
@@ -429,8 +463,8 @@ if __name__=="__main__":
         save_combined_window_video_filename = "{}/{}_combined_view_points.mp4".format(output_folder,lidar_bag_base_name)
 
         frame_width = 1920  # Adjust according to final window size
-        frame_height = 720
-        fps = 10  # Frames per second
+        frame_height = 1080
+        fps = 20  # Frames per second
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use 'XVID' for .avi or 'mp4v' for .mp4
         video_writer = cv2.VideoWriter(save_combined_window_video_filename, fourcc, fps, (frame_width, frame_height))
 
@@ -479,7 +513,26 @@ if __name__=="__main__":
         cv2.namedWindow("Only Lidar points with Photo colour", cv2.WINDOW_NORMAL) 
         cv2.namedWindow("Semantic Image", cv2.WINDOW_NORMAL) 
         cv2.namedWindow("Alpha Blended Image",cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Unified Visualization",cv2.WINDOW_NORMAL)
+
+        cv2.namedWindow("Unified Visualization", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Unified Visualization", frame_width, frame_height)  # Set initial size
+
+        # Visualization Configuration
+        vis_config = {
+            "window_width": 1600,
+            "window_height": 900,
+            "point_size": 1.0,  # Fine visualization
+            "background_color": [255, 255, 255],  # Black background
+            "show_coordinate_frame": False,
+            "point_color_option": "ZCoordinate",  # Color based on Z-coordinate (height/depth)
+            "add_horizontal_plane": False,
+            "rectangle": {
+                "bottom_left": [0.0, 0.0, -3.0],  # Height for horizontal plane
+                "top_right": [0.0, 0.0, -3.0],
+                "color": [0.2, 0.2, 0.2]
+            }
+        }
+
         # cv2.namedWindow("Depth Image",cv2.WINDOW_NORMAL)
 
         # LiDAR to Camera Transformation Matrix
@@ -497,31 +550,59 @@ if __name__=="__main__":
         start_time = time.time()
 
         # Initialize empty Open3D point cloud
-        pcd_live = o3d.geometry.PointCloud()
+        pcd_live_semantic = o3d.geometry.PointCloud()
+        pcd_live_photo = o3d.geometry.PointCloud()
         # Setup Open3D Visualizer
 
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name="Live Semantic Point Cloud", width=960, height=720)
+        # Setup Open3D Visualizer
+        vis_semantic = o3d.visualization.Visualizer()
+        vis_semantic.create_window(window_name="Live Semantic Point Cloud",
+                                width=vis_config["window_width"],
+                                height=vis_config["window_height"],
+                                visible=False)
 
-        render_options = vis.get_render_option()
-        render_options.background_color = np.array([0, 0, 0])  # Set background to black for better contrast
-        render_options.point_show_normal = False  # Hide normals to avoid clutter
-        render_options.point_size = 6 # Bigger points for better visibility
-        render_options.light_on = True  
-        render_options.mesh_show_back_face = True 
-        render_options.show_coordinate_frame = True
-        render_options.point_color_option = o3d.visualization.PointColorOption.Color 
-        # Set initial camera view (only once, at start)
+        render_options = vis_semantic.get_render_option()
+        render_options.point_size = vis_config["point_size"]
+        render_options.background_color = np.array(vis_config["background_color"])
+        render_options.show_coordinate_frame = vis_config["show_coordinate_frame"]
+
+        # Set point color option based on configuration
+        render_options.point_color_option = o3d.visualization.PointColorOption.Color
 
 
-        # ctr = vis.get_view_control()
-        # ctr.set_zoom(0.8)
-        # ctr.set_lookat([0, 0, 0])
-        # ctr.set_front([1, 0, 0])
-        # ctr.set_up([0, -1, 0])
-       
 
-        vis.add_geometry(pcd_live)
+        vis_semantic.add_geometry(pcd_live_semantic)
+        view_control = vis_semantic.get_view_control()
+        # Define a fixed view (example parameters)
+        view_control.set_lookat([0, 0, 0])  # Center of the scene
+        view_control.set_up([0, -1, 0])     # Direction of the 'up' vector
+        view_control.set_front([1, 0, 0])   # Direction the camera faces
+        view_control.set_zoom(0.8)          # Zoom level (1.0 means default distance)
+
+
+        # Setup Open3D Visualizer for Photorealistic PCD
+        vis_photo = o3d.visualization.Visualizer()
+        vis_photo.create_window(window_name="Live Photo Point Cloud",
+                                width=vis_config["window_width"],
+                                height=vis_config["window_height"],
+                                visible=False)
+
+        render_options_photo = vis_photo.get_render_option()
+        render_options_photo.point_size = vis_config["point_size"]
+        render_options_photo.background_color = np.array(vis_config["background_color"])
+        render_options_photo.show_coordinate_frame = vis_config["show_coordinate_frame"]
+
+        # Set point color option to match semantic PCD visualization
+        render_options_photo.point_color_option = o3d.visualization.PointColorOption.Color
+
+        vis_photo.add_geometry(pcd_live_photo)
+
+        # Apply consistent camera view
+        view_control_photo = vis_photo.get_view_control()
+        view_control_photo.set_lookat([0, 0, 0])
+        view_control_photo.set_up([0, -1, 0])
+        view_control_photo.set_front([0.5, -0.8, 0.5])
+        view_control_photo.set_zoom(3)
 
 
 
@@ -554,6 +635,40 @@ if __name__=="__main__":
 
         points_counter =0
         image_counter = 0
+
+        # During the visualization update loop
+        vis_semantic.update_geometry(pcd_live_semantic)
+        vis_semantic.poll_events()
+        vis_semantic.update_renderer()
+
+        # Add horizontal plane if configured
+        if vis_config["add_horizontal_plane"]:
+            min_bound = pcd_live_semantic.get_min_bound()
+            max_bound = pcd_live_semantic.get_max_bound()
+
+            bottom_left = [
+                min_bound[0],
+                min_bound[1],
+                vis_config["rectangle"]["bottom_left"][2],
+            ]
+            top_right = [
+                max_bound[0],
+                max_bound[1],
+                vis_config["rectangle"]["top_right"][2],
+            ]
+            rectangle = create_rectangle(bottom_left, top_right, vis_config["rectangle"]["color"])
+            vis_semantic.add_geometry(rectangle)
+
+        # Apply the predefined view parameters
+        view_control = vis_semantic.get_view_control()
+        view_control.set_lookat([0, 0, 0])
+        view_control.set_up([0, -1, 0])
+        view_control.set_front([0.5, -0.8, 0.5]) 
+        view_control.set_zoom(3)
+
+
+
+
 
         for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, left_image_topic, right_image_topic]):
             timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
@@ -758,20 +873,26 @@ if __name__=="__main__":
 
 
                 # if len(new_points) > 0:
-                pcd_live.points = o3d.utility.Vector3dVector(np.vstack(pcd_points))
+                pcd_live_semantic.points = o3d.utility.Vector3dVector(np.vstack(pcd_points))           
+                pcd_live_semantic.colors = o3d.utility.Vector3dVector(np.vstack(semantic_colors_list))
 
-                print("len(pcd_live.points)",len(pcd_live.points))
-                # pcd_live.colors.extend(semantic_colors)
-                pcd_live.colors = o3d.utility.Vector3dVector(np.vstack(semantic_colors_list))
+                pcd_live_photo.points = o3d.utility.Vector3dVector(np.vstack(pcd_points))           
+                pcd_live_photo.colors = o3d.utility.Vector3dVector(np.vstack(photo_colors_list))
+
                 
-                combine_visualization(vis, left_image, image_with_red, black_image, semantic_color_mask, overlayed_image)
+                combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_image)
 
 
                 # import pdb;pdb.set_trace()
-                vis.update_geometry(pcd_live)
-                vis.poll_events()
-                vis.update_renderer()
-                vis.reset_view_point(True) 
+                vis_semantic.update_geometry(pcd_live_semantic)
+                vis_semantic.poll_events()
+                vis_semantic.update_renderer()
+                vis_semantic.reset_view_point(True) 
+
+                vis_photo.update_geometry(pcd_live_photo)
+                vis_photo.poll_events()
+                vis_photo.update_renderer()
+                vis_photo.reset_view_point(True) 
 
 
                 cv2.imshow("Original Image with lidar points in red projected",image_with_red) 
@@ -882,8 +1003,16 @@ if __name__=="__main__":
                 o3d.io.write_point_cloud(output_pcd_semantic_file, pcd_semantic)
                 o3d.io.write_point_cloud(output_pcd_photo_file, pcd_photo)
                 # Visualize the final point cloud
-                o3d.visualization.draw_geometries([pcd_semantic], window_name="Photorealistic 3D Map",
-                                                point_show_normal=False)
+                # o3d.visualization.draw_geometries([pcd_semantic], window_name="Semantic 3D Map",
+                #                                 point_show_normal=False)
+                map_cloud_semantic = o3d.io.read_point_cloud(output_pcd_semantic_file)   
+                config_path = "config/pcd_config.yaml"
+                config = load_config(config_path)    
+                visualize_mapcloud(map_cloud_semantic, config)
+                map_cloud_photo = o3d.io.read_point_cloud(output_pcd_photo_file)   
+                config_path = "config/pcd_config.yaml"
+                config = load_config(config_path)    
+                visualize_mapcloud(map_cloud_photo, config)
 
         lidar_bag.close()
         print("Visualization running... Press Q to exit.")

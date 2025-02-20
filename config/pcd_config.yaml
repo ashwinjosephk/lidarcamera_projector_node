@@ -1,0 +1,17 @@
+pcd_file_path: "PCD/30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_output_map_semantic.ply"
+# pcd_file_path: "kitti/0000000000.bin"
+window_width: 1600
+window_height: 900
+point_size: 1.0
+point_color_option: "Color"
+background_color: [0, 0, 0]  # black color
+show_coordinate_frame: false # true - shows coordinate frame axis (but no grid)
+point_color_option: "ZCoordinate" # other options: Default, Color, Normal, XCoordinate, YCoordinate, ZCoordinate
+
+
+# horizontal plane options
+add_horizontal_plane: false
+rectangle:
+  bottom_left: [0.0, 0.0, -3.0] # only height (z) is used, x and y are taken from cloud bounding box
+  top_right:   [0.0, 0.0, -3.0] # only height (z) is used, x and y are taken from cloud bounding box
+  color:       [0.2, 0.2, 0.2]
