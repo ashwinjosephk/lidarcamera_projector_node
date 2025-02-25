@@ -16,6 +16,9 @@ import yaml
 from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample, apply_saved_view
 from stereodepth import compute_depth_from_stereo
 from utils import compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
+import threading
+from queue import Queue
+
 
 
 def semantic_segmentation_inference(image, model, processor):
@@ -146,6 +149,8 @@ if __name__=="__main__":
         # video_frame_width = 3840  # Adjust according to final window size
         # video_frame_height = 2160
         fps = 10 # Frames per second
+        frame_queue = Queue(maxsize=10)  # Store up to 10 frames before processing
+
         fourcc_avi = cv2.VideoWriter_fourcc(*'XVID')  # Use 'XVID' for .avi or 'mp4v' for .mp4
         video_writer = cv2.VideoWriter(save_combined_window_video_filename_avi, fourcc_avi, fps, (frame_width, frame_height))
         fourcc_mp4v = cv2.VideoWriter_fourcc(*'mp4v') 
@@ -177,7 +182,7 @@ if __name__=="__main__":
         model.to(device)
         CATEGORY_COLORS = load_category_colors()
         camera_intrinsics = load_camera_intrinsics()
-        selected_classes = [1, 2]  #for filtering specific classes in the filtered pointcloud
+        selected_classes = [1, 2, 4]  #for filtering specific classes in the filtered pointcloud
         #{"0": {"color": [135, 206, 250], "name": "Sky"}, "1": {"color": [0, 191, 255], "name": "Water"}, "2": {"color": [50, 205, 50], "name": "Vegetation"}, "3": {"color": [34, 139, 34], "name": "Riverbank"}, "4": {"color": [184, 134, 11], "name": "Bridge"}, "5": {"color": [157, 0, 255], "name": "Other"}}
 
         trajectory_flag = False
@@ -221,11 +226,19 @@ if __name__=="__main__":
 
         # cv2.namedWindow("Depth Image",cv2.WINDOW_NORMAL)
 
-        # LiDAR to Camera Transformation Matrix
+        # Velodyne LiDAR to Camera Transformation Matrix
         R = np.array([[-0.0086, 0.0068, 0.9999],
                     [-1.0000, -0.0006, -0.0086],
                     [0.0006, -1.0000, 0.0068]])
         translation = np.array([0.0441, 0.0649, -0.0807])  # My estimates
+
+        # Ouster LiDAR to Camera Transformation Matrix
+        # R = np.array([[-0.0308, 0.0251, 0.9992],
+        #             [-0.9995, -0.0108, -0.0305],
+        #             [0.0101, -0.9996, 0.0254]])
+        # translation = np.array([1.607, 0.06, -0.212])  # My estimates
+
+
 
         def rigid_transform(points, R, translation):
             """Apply rigid transformation to the point cloud."""
