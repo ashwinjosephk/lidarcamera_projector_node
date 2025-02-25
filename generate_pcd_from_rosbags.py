@@ -13,7 +13,7 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 import torch
 from PIL import Image
 import yaml
-from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample
+from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample, apply_saved_view
 from stereodepth import compute_depth_from_stereo
 from utils import compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
 
@@ -83,7 +83,13 @@ def combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_ima
  
     # Show the final unified visualization
     cv2.imshow("Unified Visualization", final_combined)
+    print("GOnna Save video")
     video_writer.write(final_combined)
+    video_writer_mp4.write(final_combined)
+    video_writer_mjpg.write(final_combined)
+    video_writer_h264.write(final_combined)
+    video_writer_ffv1.write(final_combined)
+    print("done normal saving")
 
 
 
@@ -111,7 +117,7 @@ if __name__=="__main__":
 
 
     if 1:
-        lidar_bag_base_name = "7_anlegen_80m_100kmph_BTUwDLR"
+        lidar_bag_base_name = "30_bridgecurve_80m_100kmph_BTUwDLR"
 
     # for lidar_bag_base_name in lidar_bags_base_name_list:
 
@@ -127,14 +133,31 @@ if __name__=="__main__":
         output_pcd_photo_file = "{}/{}_trajectory_output_map_photo.ply".format(output_folder,lidar_bag_base_name)
         output_trajectory_pcd_file = "{}/{}_trajectory_output_map_trajectory.ply".format(output_folder,lidar_bag_base_name)
         filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
-        save_combined_window_video_filename = "{}/{}_combined_view_points.mp4".format(output_folder,lidar_bag_base_name)
         class_labels_dump_filename = "{}/{}_class_labels.npy".format(output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_avi = "{}/{}_combined_view_points_avi.avi".format(output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_mp4 = "{}/{}_combined_view_points_mp4.mp4".format(output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_mjpg = "{}/{}_combined_view_points_MJPG.avi".format(output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_h264 = "{}/{}_combined_view_points_h264.mp4".format(output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_ffv1 = "{}/{}_combined_view_points_ffv1.avi".format(output_folder,lidar_bag_base_name)
+        
 
         frame_width = 1920  # Adjust according to final window size
         frame_height = 1080
-        fps = 20  # Frames per second
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use 'XVID' for .avi or 'mp4v' for .mp4
-        video_writer = cv2.VideoWriter(save_combined_window_video_filename, fourcc, fps, (frame_width, frame_height))
+        # video_frame_width = 3840  # Adjust according to final window size
+        # video_frame_height = 2160
+        fps = 10 # Frames per second
+        fourcc_avi = cv2.VideoWriter_fourcc(*'XVID')  # Use 'XVID' for .avi or 'mp4v' for .mp4
+        video_writer = cv2.VideoWriter(save_combined_window_video_filename_avi, fourcc_avi, fps, (frame_width, frame_height))
+        fourcc_mp4v = cv2.VideoWriter_fourcc(*'mp4v') 
+        video_writer_mp4 = cv2.VideoWriter(save_combined_window_video_filename_mp4, fourcc_mp4v, fps, (frame_width, frame_height))
+        fourcc_mjpg = cv2.VideoWriter_fourcc(*'MJPG')  
+        video_writer_mjpg = cv2.VideoWriter(save_combined_window_video_filename_mjpg, fourcc_mjpg, fps, (frame_width, frame_height))
+        fourcc_h264 = cv2.VideoWriter_fourcc(*'H264')
+        video_writer_h264 = cv2.VideoWriter(save_combined_window_video_filename_h264, fourcc_h264, fps, (frame_width, frame_height))
+        fourcc_ffv1 = cv2.VideoWriter_fourcc(*'FFV1')
+        video_writer_ffv1 = cv2.VideoWriter(save_combined_window_video_filename_ffv1, fourcc_ffv1, fps, (frame_width, frame_height))
+
+
 
         #TOpic names
         lidar_topic = "/VLP32/velodyne_points"
@@ -154,7 +177,8 @@ if __name__=="__main__":
         model.to(device)
         CATEGORY_COLORS = load_category_colors()
         camera_intrinsics = load_camera_intrinsics()
-        selected_classes = [1, 2, 4]  #for filtering specific classes in the filtered pointcloud
+        selected_classes = [1, 2]  #for filtering specific classes in the filtered pointcloud
+        #{"0": {"color": [135, 206, 250], "name": "Sky"}, "1": {"color": [0, 191, 255], "name": "Water"}, "2": {"color": [50, 205, 50], "name": "Vegetation"}, "3": {"color": [34, 139, 34], "name": "Riverbank"}, "4": {"color": [184, 134, 11], "name": "Bridge"}, "5": {"color": [157, 0, 255], "name": "Other"}}
 
         trajectory_flag = False
         apply_ransac_flag = False
@@ -220,8 +244,7 @@ if __name__=="__main__":
         vis_semantic = o3d.visualization.Visualizer()
         vis_semantic.create_window(window_name="Live Semantic Point Cloud",
                                 width=vis_config["window_width"],
-                                height=vis_config["window_height"],
-                                visible=False)
+                                height=vis_config["window_height"])
 
         render_options = vis_semantic.get_render_option()
         render_options.point_size = vis_config["point_size"]
@@ -232,14 +255,15 @@ if __name__=="__main__":
         render_options.point_color_option = o3d.visualization.PointColorOption.Color
 
 
-
+        
         vis_semantic.add_geometry(pcd_live_semantic)
-        view_control = vis_semantic.get_view_control()
-        # Define a fixed view (example parameters)
-        view_control.set_lookat([0, 0, 0])  # Center of the scene
-        view_control.set_up([0, -1, 0])     # Direction of the 'up' vector
-        view_control.set_front([1, 0, 0])   # Direction the camera faces
-        view_control.set_zoom(0.8)          # Zoom level (1.0 means default distance)
+        apply_saved_view(vis_semantic)
+        # view_control = vis_semantic.get_view_control()
+        # # Define a fixed view (example parameters)
+        # view_control.set_lookat([0, 0, 0])  # Center of the scene
+        # view_control.set_up([0, -1, 0])     # Direction of the 'up' vector
+        # view_control.set_front([1, 0, 0])   # Direction the camera faces
+        # view_control.set_zoom(0.8)          # Zoom level (1.0 means default distance)
 
 
         # Setup Open3D Visualizer for Photorealistic PCD
@@ -256,15 +280,15 @@ if __name__=="__main__":
 
         # Set point color option to match semantic PCD visualization
         render_options_photo.point_color_option = o3d.visualization.PointColorOption.Color
-
+        
         vis_photo.add_geometry(pcd_live_photo)
-
+        apply_saved_view(vis_photo)
         # Apply consistent camera view
-        view_control_photo = vis_photo.get_view_control()
-        view_control_photo.set_lookat([0, 0, 0])
-        view_control_photo.set_up([0, -1, 0])
-        view_control_photo.set_front([0.5, -0.8, 0.5])
-        view_control_photo.set_zoom(3)
+        # view_control_photo = vis_photo.get_view_control()
+        # view_control_photo.set_lookat([0, 0, 0])
+        # view_control_photo.set_up([0, -1, 0])
+        # view_control_photo.set_front([0.5, -0.8, 0.5])
+        # view_control_photo.set_zoom(3)
 
 
 
@@ -321,12 +345,7 @@ if __name__=="__main__":
             rectangle = create_rectangle(bottom_left, top_right, vis_config["rectangle"]["color"])
             vis_semantic.add_geometry(rectangle)
 
-        # Apply the predefined view parameters
-        view_control = vis_semantic.get_view_control()
-        view_control.set_lookat([0, 0, 0])
-        view_control.set_up([0, -1, 0])
-        view_control.set_front([0.5, -0.8, 0.5]) 
-        view_control.set_zoom(3)
+
 
 
 
@@ -390,6 +409,9 @@ if __name__=="__main__":
 
                 
                 # Apply LiDAR to Camera transformation for lidar to camera projection- every point still there
+                
+
+                
                 transformed_points = rigid_transform(lidar_points[:, :3], R, translation)
 
                 Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
@@ -563,7 +585,11 @@ if __name__=="__main__":
                 cv2.imshow("Alpha Blended Image", overlayed_image) 
                 cv2.waitKey(50) 
 
-
+        video_writer.release()
+        video_writer_h264.release()
+        video_writer_mjpg.release()
+        video_writer_mp4.release()
+        video_writer_ffv1.release()
         cv2.destroyAllWindows()
         # vis.destroy_window()
         print("************************")
@@ -676,6 +702,14 @@ if __name__=="__main__":
                 config_path = "config/pcd_config.yaml"
                 config = load_config(config_path)    
                 visualize_mapcloud(map_cloud_photo, config)
+
+                # ✅ Filter only selected classes and save separately
+                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes,CATEGORY_COLORS)
+                o3d.visualization.draw_geometries([filtered_pcd], 
+                                                window_name="Filtered Pointcloud",
+                                                point_show_normal=False)
+                o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
+                print("✅ Filtered PCD saved as filtered_pcd.ply")
 
         lidar_bag.close()
         print("Visualization running... Press Q to exit.")
