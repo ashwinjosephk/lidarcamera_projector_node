@@ -13,9 +13,9 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 import torch
 from PIL import Image
 import yaml
-from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample, apply_saved_view
+from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample, visualize_pcd_with_custom_settings
 from stereodepth import compute_depth_from_stereo
-from utils import compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
+from utils import save_pointcloud_to_txt, compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
 import threading
 from queue import Queue
 
@@ -54,48 +54,102 @@ def semantic_segmentation_inference(image, model, processor):
 def combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_image): 
     """
     Combines OpenCV images and Open3D visualization into a single window.
+    Ensures no image distortion while saving video.
     """
     vis_semantic.poll_events()
     vis_semantic.update_renderer()
     vis_photo.poll_events()
     vis_photo.update_renderer()
     
-    # Capture the Open3D rendering
+    # Capture Open3D renderings **exactly as displayed**
     render_semantic = vis_semantic.capture_screen_float_buffer(do_render=True)
-    
     render_semantic_np = (np.asarray(render_semantic) * 255).astype(np.uint8)
-    
-    render_semantic_np = cv2.cvtColor(render_semantic_np, cv2.COLOR_RGB2BGR)  # Fix RGB to BGR conversion
+    render_semantic_np = cv2.cvtColor(render_semantic_np, cv2.COLOR_RGB2BGR)
 
     render_photo = vis_photo.capture_screen_float_buffer(do_render=True)
     render_photo_np = (np.asarray(render_photo) * 255).astype(np.uint8)
-    render_photo_np = cv2.cvtColor(render_photo_np, cv2.COLOR_RGB2BGR)  # Fix RGB to BGR conversion
-    
-    # Resize images to fill the unified visualization window
-    target_size = (frame_width // 2, frame_height // 2)
+    render_photo_np = cv2.cvtColor(render_photo_np, cv2.COLOR_RGB2BGR)
 
-    image_with_red_resized = cv2.resize(image_with_red, target_size)
-    overlayed_image_resized = cv2.resize(overlayed_image, target_size)
-    render_semantic_resized = cv2.resize(render_semantic_np, target_size)
-    render_photo_resized = cv2.resize(render_photo_np, target_size)
+    # ✅ Keep original sizes of input images
+    image_with_red_h, image_with_red_w = image_with_red.shape[:2]
+    overlayed_image_h, overlayed_image_w = overlayed_image.shape[:2]
 
-    # Create the final combined view
-    top_row = cv2.hconcat([image_with_red_resized, overlayed_image_resized])
-    bottom_row = cv2.hconcat([render_photo_resized, render_semantic_resized])
-    final_combined = cv2.vconcat([top_row, bottom_row])
- 
-    # Show the final unified visualization
+    # Resize overlayed image only if necessary (to match height of image_with_red)
+    if overlayed_image_h != image_with_red_h:
+        scale_factor = image_with_red_h / overlayed_image_h
+        overlayed_image_resized = cv2.resize(overlayed_image, 
+                                             (int(overlayed_image_w * scale_factor), image_with_red_h))
+    else:
+        overlayed_image_resized = overlayed_image
+
+    # Ensure both images are the same width (scale proportionally)
+    if overlayed_image_resized.shape[1] != image_with_red_w:
+        scale_factor = image_with_red_w / overlayed_image_resized.shape[1]
+        overlayed_image_resized = cv2.resize(overlayed_image_resized, 
+                                             (image_with_red_w, int(overlayed_image_resized.shape[0] * scale_factor)))
+
+    # Create the final combined view (NO forced resizing)
+    final_combined = cv2.hconcat([image_with_red, overlayed_image_resized])
+
+    # Show exactly how it will appear in the video
     cv2.imshow("Unified Visualization", final_combined)
-    print("GOnna Save video")
-    video_writer.write(final_combined)
-    video_writer_mp4.write(final_combined)
-    video_writer_mjpg.write(final_combined)
-    video_writer_h264.write(final_combined)
-    video_writer_ffv1.write(final_combined)
-    print("done normal saving")
+
+    return final_combined
 
 
 
+
+
+def load_odomoetry_rosbag_info(odometry_bag_path,odometry_topic):
+    # Load odometry from ROS bag with high-precision timestamps
+    odometry_data = []
+    odometry_bag = rosbag.Bag(odometry_bag_path, "r")
+    for topic, msg, t in odometry_bag.read_messages(topics=[odometry_topic]):
+        timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
+        position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        orientation = np.array([msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w])
+        odometry_data.append((timestamp, position, orientation))
+    odometry_bag.close()
+
+    # Sort odometry data by timestamp
+    odometry_data.sort(key=lambda x: x[0])
+
+    return odometry_data
+
+def load_odometry_from_txt(odometry_txt_path):
+    odometry_data = []
+    with open(odometry_txt_path, 'r') as file:
+        for line in file:
+            parts = line.strip().split(',')
+            if len(parts) == 8:  # Ensure correct format
+                timestamp = float(parts[0])
+                position = np.array([float(parts[1]), float(parts[2]), float(parts[3])])
+                orientation = np.array([float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])])
+                odometry_data.append((timestamp, position, orientation))
+
+    # Sort odometry data by timestamp
+    odometry_data.sort(key=lambda x: x[0])
+    return odometry_data
+
+# Visualize the saved maps **with consistent viewing settings**
+def configure_view(vis, pcd):
+    """Apply consistent Open3D visualization settings."""
+    render_options = vis.get_render_option()
+    render_options.point_size = 2.0  # Same fine visualization
+    render_options.background_color = np.array([255, 255, 255])  # White background
+    vis.add_geometry(pcd)
+
+    # Set consistent camera settings
+    view_control = vis.get_view_control()
+    bounding_box = pcd.get_axis_aligned_bounding_box()
+    center = bounding_box.get_center()
+    view_control.set_lookat(center)
+    view_control.set_front([0, -1, 0])  # Keep direction same
+    view_control.set_up([0, 0, 1])  # Maintain Z-up
+    view_control.set_zoom(1.5)  # Adjust for visibility
+
+    vis.run()
+    vis.destroy_window()
 
 if __name__=="__main__":
     # Paths to ROS bags and output file
@@ -109,10 +163,11 @@ if __name__=="__main__":
     30_bridgecurve_80m_100kmph_BTUwDLR
     37_curvepromenade_160m_100kmph_BTUwDLR
     53_schleuseeinfahrt_20m_100kmph_BTUwDLR
+    IROS2024_Westhafen2LoopsSmallIsland
 
     '''
 
-    lidar_bags_base_name_list = ['7_anlegen_80m_100kmph_BTUwDLR', '9_anlegen_80m_100kmph_BTUwDLR', '17_straight_200m_100kmph_BTUwDLR', '29_bridgecurve_80m_100kmph_BTUwDLR','30_bridgecurve_80m_100kmph_BTUwDLR','37_curvepromenade_160m_100kmph_BTUwDLR','53_schleuseeinfahrt_20m_100kmph_BTUwDLR']
+    lidar_bags_base_name_list = ['7_anlegen_80m_100kmph_BTUwDLR', '9_anlegen_80m_100kmph_BTUwDLR', '17_straight_200m_100kmph_BTUwDLR', '29_bridgecurve_80m_100kmph_BTUwDLR','30_bridgecurve_80m_100kmph_BTUwDLR','37_curvepromenade_160m_100kmph_BTUwDLR','53_schleuseeinfahrt_20m_100kmph_BTUwDLR','2023.11.07_friedrichstrasseToBerlinDom']
 
 
 
@@ -127,30 +182,52 @@ if __name__=="__main__":
         #Paths
         lidar_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}.bag".format(lidar_bag_base_name,lidar_bag_base_name)
         odometry_bag_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_trajectory.bag".format(lidar_bag_base_name,lidar_bag_base_name)
+        odometry_txt_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_trajectory.txt".format(lidar_bag_base_name, lidar_bag_base_name)
         original_bag_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_images/images".format(lidar_bag_base_name,lidar_bag_base_name)
+        lidaroverlay_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_images/lidaroverlay_images".format(lidar_bag_base_name,lidar_bag_base_name)
+        semantic_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_images/semantic_images".format(lidar_bag_base_name,lidar_bag_base_name)
         output_txt_dir = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}".format(lidar_bag_base_name)
 
         output_folder = os.path.join(output_txt_dir,"output_pcd")
-        os.makedirs(output_folder, exist_ok=True)
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
         output_pcd_semantic_file = "{}/{}_trajectory_output_map_semantic.ply".format(output_folder,lidar_bag_base_name)
         output_pcd_photo_file = "{}/{}_trajectory_output_map_photo.ply".format(output_folder,lidar_bag_base_name)
         output_trajectory_pcd_file = "{}/{}_trajectory_output_map_trajectory.ply".format(output_folder,lidar_bag_base_name)
         filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
         class_labels_dump_filename = "{}/{}_class_labels.npy".format(output_folder,lidar_bag_base_name)
-        save_combined_window_video_filename_avi = "{}/{}_combined_view_points_avi.avi".format(output_folder,lidar_bag_base_name)
-        save_combined_window_video_filename_mp4 = "{}/{}_combined_view_points_mp4.mp4".format(output_folder,lidar_bag_base_name)
-        save_combined_window_video_filename_mjpg = "{}/{}_combined_view_points_MJPG.avi".format(output_folder,lidar_bag_base_name)
-        save_combined_window_video_filename_h264 = "{}/{}_combined_view_points_h264.mp4".format(output_folder,lidar_bag_base_name)
-        save_combined_window_video_filename_ffv1 = "{}/{}_combined_view_points_ffv1.avi".format(output_folder,lidar_bag_base_name)
+        # save_combined_window_video_filename_avi = "{}/{}_combined_view_points_avi.avi".format(output_folder,lidar_bag_base_name)
+        # save_combined_window_video_filename_mp4 = "{}/{}_combined_view_points_mp4.mp4".format(output_folder,lidar_bag_base_name)
+        # save_combined_window_video_filename_mjpg = "{}/{}_combined_view_points_MJPG.avi".format(output_folder,lidar_bag_base_name)
+        # save_combined_window_video_filename_h264 = "{}/{}_combined_view_points_h264.mp4".format(output_folder,lidar_bag_base_name)
+        # save_combined_window_video_filename_ffv1 = "{}/{}_combined_view_points_ffv1.avi".format(output_folder,lidar_bag_base_name)
         
 
-        frame_width = 1920  # Adjust according to final window size
-        frame_height = 1080
+        frame_width = 4416  # Adjust according to final window size
+        frame_height = 1242
         # video_frame_width = 3840  # Adjust according to final window size
         # video_frame_height = 2160
         fps = 10 # Frames per second
         frame_queue = Queue(maxsize=10)  # Store up to 10 frames before processing
 
+
+        # Define output file paths
+        video_output_folder = output_folder
+        os.makedirs(video_output_folder, exist_ok=True)
+
+        # save_avi_xvid = os.path.join(video_output_folder, f"{lidar_bag_base_name}_XVID.avi")
+        # save_avi_ffv1 = os.path.join(video_output_folder, f"{lidar_bag_base_name}_FFV1.avi")
+        # save_avi_mjpg = os.path.join(video_output_folder, f"{lidar_bag_base_name}_MJPG.avi")
+        # save_mp4 = os.path.join(video_output_folder, f"{lidar_bag_base_name}.mp4")
+
+        save_combined_window_video_filename_avi = "{}/{}_combined_view_points_avi.avi".format(video_output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_mp4 = "{}/{}_combined_view_points_mp4.mp4".format(video_output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_mjpg = "{}/{}_combined_view_points_MJPG.avi".format(video_output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_h264 = "{}/{}_combined_view_points_h264.mp4".format(video_output_folder,lidar_bag_base_name)
+        save_combined_window_video_filename_ffv1 = "{}/{}_combined_view_points_ffv1.avi".format(video_output_folder,lidar_bag_base_name)
+
+        # Define codecs
         fourcc_avi = cv2.VideoWriter_fourcc(*'XVID')  # Use 'XVID' for .avi or 'mp4v' for .mp4
         video_writer = cv2.VideoWriter(save_combined_window_video_filename_avi, fourcc_avi, fps, (frame_width, frame_height))
         fourcc_mp4v = cv2.VideoWriter_fourcc(*'mp4v') 
@@ -164,15 +241,21 @@ if __name__=="__main__":
 
 
 
+
+
         #TOpic names
         lidar_topic = "/VLP32/velodyne_points"
+        # lidar_topic = "/ouster/points"
         left_image_topic = "/zed2i/zed_node/left/image_rect_color/compressed"
         right_image_topic = "/zed2i/zed_node/right/image_rect_color/compressed"
+
         odometry_topic = "/lio_sam/mapping/odometry"
         
 
         trained_models_Save_path = "/home/knadmin/Ashwin/Semantic_labelled_by_Lukas_Hosch/trained_models"
-        model_name = "segformer-best_6classes_aug_adjustable_lr_customweights"
+        # trained_models_Save_path = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap"
+        # model_name = "segformer-best_6classes_aug_adjustable_lr_customweights"
+        model_name = "segformer-itr2_6classes_aug_adjustable_lr_customweights"
         model_save_path = os.path.join(trained_models_Save_path,model_name)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         processor = SegformerImageProcessor.from_pretrained("nvidia/mit-b0")
@@ -180,7 +263,15 @@ if __name__=="__main__":
         model = SegformerForSemanticSegmentation.from_pretrained(model_save_path).to(device)
         model.eval()  # Ensure model is in evaluation mode
         model.to(device)
-        CATEGORY_COLORS = load_category_colors()
+        # CATEGORY_COLORS = load_category_colors()
+        CATEGORY_COLORS = {
+        0: ([135, 206, 250], "Sky"),
+        1: ([0, 191, 255], "Water"),
+        2: ([50, 205, 50], "Vegetation"),
+        3: ([200, 0, 0], "Riverbank"),
+        4: ([184, 134, 11], "Bridge"),
+        5: ([157, 0, 255], "Other")
+        }
         camera_intrinsics = load_camera_intrinsics()
         selected_classes = [1, 2, 4]  #for filtering specific classes in the filtered pointcloud
         #{"0": {"color": [135, 206, 250], "name": "Sky"}, "1": {"color": [0, 191, 255], "name": "Water"}, "2": {"color": [50, 205, 50], "name": "Vegetation"}, "3": {"color": [34, 139, 34], "name": "Riverbank"}, "4": {"color": [184, 134, 11], "name": "Bridge"}, "5": {"color": [157, 0, 255], "name": "Other"}}
@@ -191,6 +282,8 @@ if __name__=="__main__":
         downsample_pcd_flag = False
         save_images_flag = False
         generate_pcd_flag = True
+        resize_flag = False
+        load_data_mode = "rosbag_mode"  #"txt_file_mode"  #"rosbag_mode"
 
         frame_count = 0  # Counter for frame-based naming
 
@@ -230,13 +323,19 @@ if __name__=="__main__":
         R = np.array([[-0.0086, 0.0068, 0.9999],
                     [-1.0000, -0.0006, -0.0086],
                     [0.0006, -1.0000, 0.0068]])
-        translation = np.array([0.0441, 0.0649, -0.0807])  # My estimates
+
+        # translation = np.array([0.0441, 0.0649, -0.0807]) #From matlab lidar toolbox calibration
+        # translation = np.array([0.059, 0.06, 0.095]) #Iulian's estimates
+        translation = np.array([0.0441, 0.0649, -0.0807]) #my_estimates
 
         # Ouster LiDAR to Camera Transformation Matrix
         # R = np.array([[-0.0308, 0.0251, 0.9992],
         #             [-0.9995, -0.0108, -0.0305],
         #             [0.0101, -0.9996, 0.0254]])
-        # translation = np.array([1.607, 0.06, -0.212])  # My estimates
+        # R = np.array([[-0.0086, 0.0068, 0.9999],
+        #     [-1.0000, -0.0006, -0.0086],
+        #     [0.0006, -1.0000, 0.0068]])
+        # translation = np.array([-3.5, -0.3797, -1.9244])  # My estimates
 
 
 
@@ -270,7 +369,7 @@ if __name__=="__main__":
 
         
         vis_semantic.add_geometry(pcd_live_semantic)
-        apply_saved_view(vis_semantic)
+        # apply_saved_view(vis_semantic)
         # view_control = vis_semantic.get_view_control()
         # # Define a fixed view (example parameters)
         # view_control.set_lookat([0, 0, 0])  # Center of the scene
@@ -284,7 +383,7 @@ if __name__=="__main__":
         vis_photo.create_window(window_name="Live Photo Point Cloud",
                                 width=vis_config["window_width"],
                                 height=vis_config["window_height"],
-                                visible=False)
+                                visible=True)
 
         render_options_photo = vis_photo.get_render_option()
         render_options_photo.point_size = vis_config["point_size"]
@@ -295,7 +394,7 @@ if __name__=="__main__":
         render_options_photo.point_color_option = o3d.visualization.PointColorOption.Color
         
         vis_photo.add_geometry(pcd_live_photo)
-        apply_saved_view(vis_photo)
+        # apply_saved_view(vis_photo)
         # Apply consistent camera view
         # view_control_photo = vis_photo.get_view_control()
         # view_control_photo.set_lookat([0, 0, 0])
@@ -306,17 +405,22 @@ if __name__=="__main__":
 
 
         # Load odometry from ROS bag with high-precision timestamps
-        odometry_data = []
-        odometry_bag = rosbag.Bag(odometry_bag_path, "r")
-        for topic, msg, t in odometry_bag.read_messages(topics=[odometry_topic]):
-            timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
-            position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
-            orientation = np.array([msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w])
-            odometry_data.append((timestamp, position, orientation))
-        odometry_bag.close()
+        # odometry_data = []
+        # odometry_bag = rosbag.Bag(odometry_bag_path, "r")
+        # for topic, msg, t in odometry_bag.read_messages(topics=[odometry_topic]):
+        #     timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
+        #     position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        #     orientation = np.array([msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w])
+        #     odometry_data.append((timestamp, position, orientation))
+        # odometry_bag.close()
+        if load_data_mode == 'rosbag_mode':
+            odometry_data = load_odomoetry_rosbag_info(odometry_bag_path,odometry_topic)
+        elif load_data_mode == 'txt_file_mode':
+            odometry_data = load_odometry_from_txt(odometry_txt_path)
 
-        # Sort odometry data by timestamp
-        odometry_data.sort(key=lambda x: x[0])
+
+
+
         odometry_timestamps = [x[0] for x in odometry_data]
 
         # Process LiDAR and Image data together
@@ -326,6 +430,7 @@ if __name__=="__main__":
         intensity_list = []
         ring_list = []
         class_labels_list = []
+        time_stamp_list = []
 
         lidar_bag = rosbag.Bag(lidar_bag_path, "r")
         left_image = None  # Initialize image storage
@@ -360,8 +465,11 @@ if __name__=="__main__":
 
 
 
+        frame_skip_rate = 1  # Process every 5th frame
+        frame_index = 0  # Counter for frames
 
-
+        os.makedirs(lidaroverlay_images_dump_folder, exist_ok=True)
+        os.makedirs(semantic_images_dump_folder, exist_ok=True)
 
 
         for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, left_image_topic, right_image_topic]):
@@ -369,9 +477,16 @@ if __name__=="__main__":
             topic_info = lidar_bag.get_type_and_topic_info()
             total_lidar_messages = topic_info.topics[lidar_topic].message_count
 
+            if frame_index % frame_skip_rate != 0:
+                frame_index += 1
+                continue  # Skip frames to reduce processing load
+            frame_index += 1
             
             if topic == left_image_topic:
                 left_image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+                if resize_flag:
+                    left_image = cv2.resize(left_image, (left_image.shape[1] * 2, left_image.shape[0] * 2), interpolation=cv2.INTER_LINEAR)
+
                 image_counter+=1
                 cv2.imshow("Original left Camera Image", left_image)
                 if save_images_flag:
@@ -381,24 +496,7 @@ if __name__=="__main__":
                     cv2.imwrite(img_path,left_image)
                 continue  # Store the latest image and move on
 
-            # if topic == right_image_topic:
-            #     right_image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
-            #     print("right_image.shape",right_image.shape)
-            #     cv2.imshow("Original right Camera Image", right_image)
-            #     # Ensure we have both left and right images before computing depth
-            #     if left_image is not None:
-            #         depth_image = compute_depth_from_stereo(left_image, right_image, camera_intrinsics)
-            #         print("depth image computed")
 
-            #         # Normalize depth for visualization (convert meters to grayscale)
-            #         depth_vis = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-            #         depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)  # Use JET colormap for better visualization
-            #         print("depth image colored")
-
-            #         # Show the depth image
-            #         cv2.imshow("Depth Image", depth_colored)
-            #         # cv2.waitKey(1)
-            
             if topic == lidar_topic and left_image is not None:
                 # Find the closest odometry timestamp
                 closest_idx = np.argmin(np.abs(np.array(odometry_timestamps) - timestamp))
@@ -413,11 +511,15 @@ if __name__=="__main__":
                 # Convert LiDAR message to numpy array- every single lidar point in this topic
                 lidar_points = np.array(list(pc2.read_points(
                         msg, field_names=("x", "y", "z", "intensity", "ring", "time"), skip_nans=True)))
+                print("Available LiDAR fields:", [f.name for f in msg.fields])
+
+                # import pdb;pdb.set_trace()
                 
                 # Extract x, y, z, intensity, and ring separately
                 points = lidar_points[:, :3]
                 intensity = lidar_points[:, 3]
                 ring = lidar_points[:, 4]
+                time_stamp_within_roation = lidar_points[:, 5]
 
 
                 
@@ -478,9 +580,22 @@ if __name__=="__main__":
 
 
                 # Save transformed + colorized LiDAR points to TXT
-                # save_pointcloud_to_txt(frame_count, transformed_points, colored_points_rgb, valid_indices, timestamp, lidar_points, output_txt_dir)
+                save_pointcloud_to_txt(frame_count, transformed_points, colored_points_photo, valid_indices, timestamp, lidar_points, output_folder, mode='photo')
+                save_pointcloud_to_txt(frame_count, transformed_points, colored_points_semantic, valid_indices, timestamp, lidar_points, output_folder, mode='semantic')
 
+                
+
+                
+
+                img_path_lidaroverlay = os.path.join(lidaroverlay_images_dump_folder,"image_{}.png".format(frame_count))
+                img_path_semantic = os.path.join(semantic_images_dump_folder,"image_{}.png".format(frame_count))
+                
+                cv2.imwrite(img_path_lidaroverlay,image_with_red)
+                cv2.imwrite(img_path_semantic,overlayed_image)
+                # import pdb;pdb.set_trace()
                 frame_count += 1  # Increment frame count
+
+
                 
                 valid_points = points[valid_indices] 
             
@@ -493,7 +608,15 @@ if __name__=="__main__":
 
                 black_image = overlay_points_on_black_image(x_proj, y_proj, left_image)
 
+                cv2.imshow("Original Image with lidar points in red projected",image_with_red) 
+                cv2.imshow("Only Lidar points with Photo colour", black_image) 
+                cv2.imshow("Semantic Image", semantic_color_mask) 
+                cv2.imshow("Alpha Blended Image", overlayed_image) 
+                cv2.waitKey(5) 
+                
+                # continue
 
+                pcd_build_start_time = time.time()
                 #part related to creating pointcloud
                 # Get corresponding odometry transformation
                 transformation = tf.quaternion_matrix(orientation)
@@ -565,6 +688,7 @@ if __name__=="__main__":
                 photo_colors_list.append(photo_colors)
                 intensity_list.append(intensity)
                 ring_list.append(ring)
+                time_stamp_list.append(time_stamp_within_roation)
                 class_labels_list.extend(class_labels) 
 
 
@@ -577,7 +701,36 @@ if __name__=="__main__":
                 pcd_live_photo.colors = o3d.utility.Vector3dVector(np.vstack(photo_colors_list))
 
                 
-                combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_image)
+                combined_video_Stream_resized = combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_image)
+                # combined_video_Stream_resized = cv2.resize(combined_video_Stream, (frame_width, frame_height))
+                print("combined_video_Stream_resized",combined_video_Stream_resized.shape)
+
+                # Write to video files
+                if video_writer.isOpened():
+                    video_writer.write(combined_video_Stream_resized)
+                else:
+                    print("Error: AVI Video writer not opened!")
+
+                if video_writer_mp4.isOpened():
+                    video_writer_mp4.write(combined_video_Stream_resized)
+                else:
+                    print("Error: MP4 Video writer not opened!")
+
+                if video_writer_mjpg.isOpened():
+                    video_writer_mjpg.write(combined_video_Stream_resized)
+                else:
+                    print("Error: MJPG Video writer not opened!")
+
+                if video_writer_h264.isOpened():
+                    video_writer_h264.write(combined_video_Stream_resized)
+                else:
+                    print("Error: H264 Video writer not opened!")
+
+                if video_writer_ffv1.isOpened():
+                    video_writer_ffv1.write(combined_video_Stream_resized)
+                else:
+                    print("Error: FFV1 Video writer not opened!")
+
 
 
                 # import pdb;pdb.set_trace()
@@ -590,13 +743,13 @@ if __name__=="__main__":
                 vis_photo.poll_events()
                 vis_photo.update_renderer()
                 vis_photo.reset_view_point(True) 
+                pcd_build_end_time = time.time()
+                pcd_build_duration = pcd_build_end_time - pcd_build_start_time
+                print("PCD Build Time per Frame",pcd_build_duration)
 
 
-                cv2.imshow("Original Image with lidar points in red projected",image_with_red) 
-                cv2.imshow("Only Lidar points with Photo colour", black_image) 
-                cv2.imshow("Semantic Image", semantic_color_mask) 
-                cv2.imshow("Alpha Blended Image", overlayed_image) 
-                cv2.waitKey(50) 
+                
+
 
         video_writer.release()
         video_writer_h264.release()
@@ -613,6 +766,7 @@ if __name__=="__main__":
         photo_colors_list = np.vstack(photo_colors_list)
         intensity_list = np.hstack(intensity_list)[:, None]  # Ensure correct shape
         ring_list = np.hstack(ring_list)[:, None]
+        time_stamp_list = np.hstack(time_stamp_list)[:, None]
         class_labels_array = np.array(class_labels_list).reshape(-1, 1)
 
 
@@ -664,70 +818,66 @@ if __name__=="__main__":
         print("Total TIme taken",time_taken)
 
         if generate_pcd_flag:
-
-            # Save the final point cloud
+            # Save the final point clouds
             print(f"Saving final Semantic 3D map to {output_pcd_semantic_file}")
             
-
             if trajectory_flag:
-
                 o3d.io.write_point_cloud(output_pcd_semantic_file, combined_pcd_semantic)
                 o3d.io.write_point_cloud(output_pcd_photo_file, combined_pcd_photo)
                 o3d.io.write_point_cloud(output_trajectory_pcd_file, trajectory_pcd)
-                
-                # Visualize both LiDAR map and Boat trajectory together
 
 
 
+                # Show each PCD with the fixed viewing configuration
+                vis1 = o3d.visualization.Visualizer()
+                vis1.create_window(window_name="Semantic 3D Map + Boat Trajectory")
+                configure_view(vis1, combined_pcd_semantic)
 
-                o3d.visualization.draw_geometries([pcd_semantic], 
-                                                window_name="Semantic 3D Map + Boat Trajectory",
-                                                point_show_normal=False)
-                o3d.visualization.draw_geometries([pcd_photo], 
-                                                window_name="Photorealistic Map + Boat Trajectory",
-                                                point_show_normal=False)
-                o3d.visualization.draw_geometries([trajectory_pcd], 
-                                                window_name="Boat Trajectory",
-                                                point_show_normal=False)
-                
-                
+                vis2 = o3d.visualization.Visualizer()
+                vis2.create_window(window_name="Photorealistic Map + Boat Trajectory")
+                configure_view(vis2, combined_pcd_photo)
 
-                # ✅ Filter only selected classes and save separately
-                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes,CATEGORY_COLORS)
-                o3d.visualization.draw_geometries([filtered_pcd], 
-                                                window_name="Filtered Pointcloud",
-                                                point_show_normal=False)
+                vis3 = o3d.visualization.Visualizer()
+                vis3.create_window(window_name="Boat Trajectory")
+                configure_view(vis3, trajectory_pcd)
+
+                # ✅ Filter and visualize selected classes
+                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes, CATEGORY_COLORS)
                 o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
                 print("✅ Filtered PCD saved as filtered_pcd.ply")
+
+                vis4 = o3d.visualization.Visualizer()
+                vis4.create_window(window_name="Filtered Pointcloud")
+                configure_view(vis4, filtered_pcd)
 
             else:
                 o3d.io.write_point_cloud(output_pcd_semantic_file, pcd_semantic)
                 o3d.io.write_point_cloud(output_pcd_photo_file, pcd_photo)
-                # Visualize the final point cloud
-                # o3d.visualization.draw_geometries([pcd_semantic], window_name="Semantic 3D Map",
-                #                                 point_show_normal=False)
-                map_cloud_semantic = o3d.io.read_point_cloud(output_pcd_semantic_file)   
+
+                # Load and apply the visualization config
                 config_path = "config/pcd_config.yaml"
-                config = load_config(config_path)    
+                config = load_config(config_path)
+                
+                # Visualize the PCDs using the same settings as during live processing
+                map_cloud_semantic = o3d.io.read_point_cloud(output_pcd_semantic_file)   
                 visualize_mapcloud(map_cloud_semantic, config)
 
                 map_cloud_photo = o3d.io.read_point_cloud(output_pcd_photo_file)   
-                config_path = "config/pcd_config.yaml"
-                config = load_config(config_path)    
                 visualize_mapcloud(map_cloud_photo, config)
 
-                # ✅ Filter only selected classes and save separately
-                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes,CATEGORY_COLORS)
-                o3d.visualization.draw_geometries([filtered_pcd], 
-                                                window_name="Filtered Pointcloud",
-                                                point_show_normal=False)
+                # ✅ Filter and visualize selected classes
+                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes, CATEGORY_COLORS)
                 o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
                 print("✅ Filtered PCD saved as filtered_pcd.ply")
 
+                vis5 = o3d.visualization.Visualizer()
+                vis5.create_window(window_name="Filtered Pointcloud")
+                configure_view(vis5, filtered_pcd)
+
+        # Close lidar bag after processing
         lidar_bag.close()
         print("Visualization running... Press Q to exit.")
-        # vis.run()
-        
+
 
 
 
@@ -740,7 +890,6 @@ if __name__=="__main__":
 
 
         
-
 
 
 
