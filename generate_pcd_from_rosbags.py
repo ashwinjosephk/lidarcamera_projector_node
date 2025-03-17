@@ -471,18 +471,37 @@ if __name__=="__main__":
         os.makedirs(lidaroverlay_images_dump_folder, exist_ok=True)
         os.makedirs(semantic_images_dump_folder, exist_ok=True)
 
+        # Tracking variables
+        latest_left_image = None
+        latest_image_timestamp = None
+        num_lidar_frames_processed = 0  # Count LiDAR frames for the current image
+        skip_next_image = False  # Flag to skip every other image
+
+        topic_info = lidar_bag.get_type_and_topic_info()
+        total_lidar_messages = topic_info.topics[lidar_topic].message_count
+        total_lidar_messages_to_be_processed = (total_lidar_messages/4)
 
         for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, left_image_topic, right_image_topic]):
             timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
-            topic_info = lidar_bag.get_type_and_topic_info()
-            total_lidar_messages = topic_info.topics[lidar_topic].message_count
 
-            if frame_index % frame_skip_rate != 0:
-                frame_index += 1
-                continue  # Skip frames to reduce processing load
-            frame_index += 1
+
+
             
             if topic == left_image_topic:
+
+
+
+                if skip_next_image:
+                    skip_next_image = False  # Reset flag
+                    continue  # Skip this image
+
+                # if frame_index%2 == 0:
+                #     continue
+                print("FRAME COUNT",frame_index)
+                latest_image_timestamp = timestamp
+                num_lidar_frames_processed = 0  # Reset LiDAR frame count
+                skip_next_image = True  # Set flag to skip the next camera frame
+                
                 left_image = bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
                 if resize_flag:
                     left_image = cv2.resize(left_image, (left_image.shape[1] * 2, left_image.shape[0] * 2), interpolation=cv2.INTER_LINEAR)
@@ -498,13 +517,24 @@ if __name__=="__main__":
 
 
             if topic == lidar_topic and left_image is not None:
+                # Only process 2 LiDAR frames per image
+                if num_lidar_frames_processed >= 1:
+                    continue  # Skip extra LiDAR frames
+
+                num_lidar_frames_processed += 1  # Count LiDAR frames used for this image
+
+                frame_inference_start_time = time.time()
                 # Find the closest odometry timestamp
                 closest_idx = np.argmin(np.abs(np.array(odometry_timestamps) - timestamp))
                 closest_time, position, orientation = odometry_data[closest_idx]
 
-                frame_inference_start_time = time.time()
+
+
+
+
+                
                 print("**************************")
-                print("Frame counter: {}/{}".format(frame_count,total_lidar_messages))
+                print("Frame counter: {}/{}".format(frame_count,int(total_lidar_messages_to_be_processed)))
                 
                 print(f"Processing LiDAR at {timestamp} -> Closest odometry at {closest_time} (Δt = {abs(closest_time - timestamp):.3f}s)")
                 
@@ -567,7 +597,7 @@ if __name__=="__main__":
 
                 frame_inference_end_time = time.time()
                 frame_inference_duration = frame_inference_end_time - frame_inference_start_time
-                print("Per Frame inference Time",frame_inference_duration)
+                # print("Per Frame inference Time (without PCD part)",frame_inference_duration)
 
                 #Part of the code to use for using semantic iamge color
                 colored_points_semantic, class_labels, valid_indices = colorize_point_cloud_semantic(lidar_points, left_image, transformed_points, semantic_predictions)
@@ -612,7 +642,7 @@ if __name__=="__main__":
                 cv2.imshow("Only Lidar points with Photo colour", black_image) 
                 cv2.imshow("Semantic Image", semantic_color_mask) 
                 cv2.imshow("Alpha Blended Image", overlayed_image) 
-                cv2.waitKey(5) 
+                cv2.waitKey(1) 
                 
                 # continue
 
@@ -743,9 +773,13 @@ if __name__=="__main__":
                 vis_photo.poll_events()
                 vis_photo.update_renderer()
                 vis_photo.reset_view_point(True) 
+
                 pcd_build_end_time = time.time()
                 pcd_build_duration = pcd_build_end_time - pcd_build_start_time
-                print("PCD Build Time per Frame",pcd_build_duration)
+                frame_and_pcd_corresponding_process_time = pcd_build_end_time - frame_inference_start_time
+                print("Per Frame inference Time (without PCD part)",frame_inference_duration)
+                print("PCD Build Time per Frame",pcd_build_duration)        
+                print("PFrame + PCD process per corresponding parts",frame_and_pcd_corresponding_process_time)
 
 
                 
