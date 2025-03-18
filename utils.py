@@ -128,13 +128,18 @@ def overlay_points_on_black_image(u, v, image):
     print("Published projected LiDAR points onto a black image.")
     return black_image
 
-def save_pointcloud_to_txt(frame_count, transformed_points, colored_points, valid_indices, timestamp, lidar_points, output_txt_dir):
+def save_pointcloud_to_txt(frame_count, transformed_points, colored_points, valid_indices, timestamp, lidar_points, output_txt_dir, mode):
     """Saves the processed colorized LiDAR-to-Camera projected point cloud to a text file."""
+    folder_path = os.path.join(output_txt_dir, mode)
+    os.makedirs(folder_path, exist_ok=True)  # Ensure folder exists
     
-    filename = os.path.join(output_txt_dir, f"{output_txt_dir}_pcd_{frame_count:06d}.txt")
-    
+    # ✅ Corrected filename generation
+    filename = os.path.join(folder_path, f"{mode}_pcd_{frame_count:06d}.txt")
+
     # Extract valid LiDAR points, intensity, ring, and time fields
-    filtered_lidar_points = transformed_points[valid_indices]  # Use transformed LiDAR-to-Camera points
+    # filtered_lidar_points_ = transformed_points[valid_indices]  # Use transformed LiDAR-to-Camera points
+    filtered_lidar_points = lidar_points[:, :3][valid_indices]  # Use original LiDAR-to-Camera points
+    # import pdb;pdb.set_trace()
     filtered_intensity = lidar_points[valid_indices, 3]  # Extract intensity
     filtered_ring = lidar_points[valid_indices, 4]  # Extract ring index
     filtered_time = lidar_points[valid_indices, 5]  # Extract time within rotation
@@ -151,6 +156,9 @@ def save_pointcloud_to_txt(frame_count, transformed_points, colored_points, vali
 
             # Save all data in the requested format
             f.write(f"{x:.6f},{y:.6f},{z:.6f},{intensity:.2f},{ring},{time_within_rotation:.6f},{r},{g},{b}\n")
+
+
+
 
 def remove_water_using_ransac(pcd, distance_threshold=0.3, ransac_n=3, num_iterations=1000):
     """

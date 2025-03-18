@@ -18,6 +18,7 @@ from stereodepth import compute_depth_from_stereo
 from utils import save_pointcloud_to_txt, compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
 import threading
 from queue import Queue
+import gc  
 
 
 
@@ -534,7 +535,7 @@ if __name__=="__main__":
 
                 
                 print("**************************")
-                print("Frame counter: {}/{}".format(frame_count,int(total_lidar_messages_to_be_processed)))
+                print("Frame counter: {}/{}".format(frame_count+1,int(total_lidar_messages_to_be_processed)))
                 
                 print(f"Processing LiDAR at {timestamp} -> Closest odometry at {closest_time} (Δt = {abs(closest_time - timestamp):.3f}s)")
                 
@@ -551,12 +552,11 @@ if __name__=="__main__":
                 ring = lidar_points[:, 4]
                 time_stamp_within_roation = lidar_points[:, 5]
 
+                # import pdb;pdb.set_trace()
+
 
                 
-                # Apply LiDAR to Camera transformation for lidar to camera projection- every point still there
-                
-
-                
+                # Apply LiDAR to Camera transformation for coordinate system change- still 3d - every point still there           
                 transformed_points = rigid_transform(lidar_points[:, :3], R, translation)
 
                 Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
@@ -564,16 +564,19 @@ if __name__=="__main__":
                 print("Number of valid points before filtering: {} (In Total Points)".format(len(Xc)))
 
                 valid_indices = Zc > 0
+                
                 Xc, Yc, Zc = Xc[valid_indices], Yc[valid_indices], Zc[valid_indices]
                 print("Number of valid points after filtering: {} (By taking points only with forward z axis that is direction camera faces)".format(len(Xc)))
 
-
+                #projecting 3d transformed points to 2d
                 x_proj = (camera_intrinsics["fx"] * Xc / Zc + camera_intrinsics["cx"]).astype(int)
                 y_proj = (camera_intrinsics["fy"] * Yc / Zc + camera_intrinsics["cy"]).astype(int)
 
 
                 #checking if projected 2d points are within image boundary
                 valid_points = (x_proj >= 0) & (x_proj < left_image.shape[1]) & (y_proj >= 0) & (y_proj < left_image.shape[0])
+
+
                 count_trues_projected = np.sum(valid_points)
                 print("Number of valid points after using points within image {} (and after z axes filtering)".format(count_trues_projected))
 
@@ -602,7 +605,7 @@ if __name__=="__main__":
                 #Part of the code to use for using semantic iamge color
                 colored_points_semantic, class_labels, valid_indices = colorize_point_cloud_semantic(lidar_points, left_image, transformed_points, semantic_predictions)
                 # class_labels_array = np.array(class_labels).reshape(-1, 1)
-                
+                # import pdb;pdb.set_trace()
 
                 # Overlay segmentation mask on original image
                 alpha = 0.5
@@ -624,6 +627,9 @@ if __name__=="__main__":
                 cv2.imwrite(img_path_semantic,overlayed_image)
                 # import pdb;pdb.set_trace()
                 frame_count += 1  # Increment frame count
+                if frame_count % 10 == 0:
+                    gc.collect()
+                    print("Garbage collection triggered to free up memory.")
 
 
                 
