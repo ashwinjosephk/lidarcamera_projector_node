@@ -1,0 +1,38 @@
+##### view PCD options #####
+
+## option for viewing single PCD:
+# pcd_file_path: "input/lidar_map_segmented.pcd" 
+pcd_file_path: "input/30_bridgecurve_new/semantic/semantic_pcd_000007.txt" 
+# pcd_file_path: "lidar_map_segmented.pcd"
+
+## option for viewing multi PCD one by one together
+# pcd_files_list_path: "input/30_bridgecurve/*.txt"
+# pcd_files_list_path: "input/30_bridgecurve_new2/photo/*.txt"
+pcd_files_list_path: "semantic/*.txt"
+# pcd_files_list_path: "input/BerlinDom/*.txt"
+
+
+## display window options
+window_width: 1920
+window_height: 1080
+point_size: 1.0
+background_color: [0, 0, 0]  # black color
+# background_color: [1, 1, 1]  # white color
+show_coordinate_frame: false # true - shows coordinate frame axis (but no grid)
+point_color_option: "Color" # other options: Default, Color, Normal, XCoordinate, YCoordinate, ZCoordinate
+
+## horizontal plane options
+add_horizontal_plane: false
+rectangle:
+  bottom_left: [0.0, 0.0, -3.0] # only height (z) is used, x and y are taken from cloud bounding box
+  top_right:   [0.0, 0.0, -3.0] # only height (z) is used, x and y are taken from cloud bounding box
+  color:       [0.2, 0.2, 0.2]
+
+
+##### Build PCD MAP options #####
+pcd_out: "merged_map.pcd"
+pcd_in: "semantic/*.txt"
+trajectory_in: "30_bridgecurve_80m_100kmph_BTUwDLR_trajectory_filtered.txt"
+frames_out: "output/Images/Frames_out/"
+save_frames: True
+
