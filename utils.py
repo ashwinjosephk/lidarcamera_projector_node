@@ -155,7 +155,7 @@ def save_pointcloud_to_txt(frame_count, transformed_points, colored_points, vali
             _, _, _, r, g, b = colored_points[i]  
 
             # Save all data in the requested format
-            f.write(f"{x:.6f},{y:.6f},{z:.6f},{intensity:.2f},{ring},{time_within_rotation:.6f},{r},{g},{b}\n")
+            f.write(f"{timestamp:.6f},{x:.6f},{y:.6f},{z:.6f},{intensity:.2f},{ring},{time_within_rotation:.6f},{r},{g},{b}\n")
 
 
 
@@ -253,3 +253,22 @@ def filter_points_by_class(pcd, class_label):
     filtered_pcd = pcd.select_by_index(indices)
     return filtered_pcd
 
+
+
+
+def save_filtered_odometry(filtered_odometry, odometry_txt_path):
+    """
+    Saves the filtered trajectory data corresponding to processed LiDAR frames.
+    
+    Ensures the trajectory file contains only odometry timestamps matching 
+    the .txt files in the "semantic" or "photo" folders.
+    """
+    
+
+    with open(odometry_txt_path, "w") as f:
+        for timestamp, position, orientation in filtered_odometry:
+            # ✅ Save in format: timestamp, x, y, z, qx, qy, qz, qw
+            f.write(f"{timestamp:.6f},{position[0]:.6f},{position[1]:.6f},{position[2]:.6f},"
+                    f"{orientation[0]:.6f},{orientation[1]:.6f},{orientation[2]:.6f},{orientation[3]:.6f}\n")
+
+    print(f"✅ Filtered trajectory (actually used values) saved to {odometry_txt_path}")

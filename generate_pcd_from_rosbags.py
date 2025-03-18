@@ -15,7 +15,7 @@ from PIL import Image
 import yaml
 from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample, visualize_pcd_with_custom_settings
 from stereodepth import compute_depth_from_stereo
-from utils import save_pointcloud_to_txt, compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
+from utils import save_filtered_odometry, save_pointcloud_to_txt, compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
 import threading
 from queue import Queue
 import gc  
@@ -198,11 +198,7 @@ if __name__=="__main__":
         output_trajectory_pcd_file = "{}/{}_trajectory_output_map_trajectory.ply".format(output_folder,lidar_bag_base_name)
         filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
         class_labels_dump_filename = "{}/{}_class_labels.npy".format(output_folder,lidar_bag_base_name)
-        # save_combined_window_video_filename_avi = "{}/{}_combined_view_points_avi.avi".format(output_folder,lidar_bag_base_name)
-        # save_combined_window_video_filename_mp4 = "{}/{}_combined_view_points_mp4.mp4".format(output_folder,lidar_bag_base_name)
-        # save_combined_window_video_filename_mjpg = "{}/{}_combined_view_points_MJPG.avi".format(output_folder,lidar_bag_base_name)
-        # save_combined_window_video_filename_h264 = "{}/{}_combined_view_points_h264.mp4".format(output_folder,lidar_bag_base_name)
-        # save_combined_window_video_filename_ffv1 = "{}/{}_combined_view_points_ffv1.avi".format(output_folder,lidar_bag_base_name)
+        output_filtered_trajectory_file_path = "{}/{}_trajectory_filtered.txt".format(output_folder,lidar_bag_base_name)
         
 
         frame_width = 4416  # Adjust according to final window size
@@ -235,8 +231,7 @@ if __name__=="__main__":
         video_writer_mp4 = cv2.VideoWriter(save_combined_window_video_filename_mp4, fourcc_mp4v, fps, (frame_width, frame_height))
         fourcc_mjpg = cv2.VideoWriter_fourcc(*'MJPG')  
         video_writer_mjpg = cv2.VideoWriter(save_combined_window_video_filename_mjpg, fourcc_mjpg, fps, (frame_width, frame_height))
-        fourcc_h264 = cv2.VideoWriter_fourcc(*'H264')
-        video_writer_h264 = cv2.VideoWriter(save_combined_window_video_filename_h264, fourcc_h264, fps, (frame_width, frame_height))
+
         fourcc_ffv1 = cv2.VideoWriter_fourcc(*'FFV1')
         video_writer_ffv1 = cv2.VideoWriter(save_combined_window_video_filename_ffv1, fourcc_ffv1, fps, (frame_width, frame_height))
 
@@ -432,6 +427,8 @@ if __name__=="__main__":
         ring_list = []
         class_labels_list = []
         time_stamp_list = []
+        timestamps_used = []
+        filtered_odometry = []
 
         lidar_bag = rosbag.Bag(lidar_bag_path, "r")
         left_image = None  # Initialize image storage
@@ -536,6 +533,11 @@ if __name__=="__main__":
                 
                 print("**************************")
                 print("Frame counter: {}/{}".format(frame_count+1,int(total_lidar_messages_to_be_processed)))
+
+
+                # Store used odometry timestamps and data
+                timestamps_used.append(closest_time)
+                filtered_odometry.append((closest_time, position, orientation))
                 
                 print(f"Processing LiDAR at {timestamp} -> Closest odometry at {closest_time} (Δt = {abs(closest_time - timestamp):.3f}s)")
                 
@@ -757,10 +759,7 @@ if __name__=="__main__":
                 else:
                     print("Error: MJPG Video writer not opened!")
 
-                if video_writer_h264.isOpened():
-                    video_writer_h264.write(combined_video_Stream_resized)
-                else:
-                    print("Error: H264 Video writer not opened!")
+
 
                 if video_writer_ffv1.isOpened():
                     video_writer_ffv1.write(combined_video_Stream_resized)
@@ -789,10 +788,10 @@ if __name__=="__main__":
 
 
                 
-
+        save_filtered_odometry(filtered_odometry, output_filtered_trajectory_file_path)
 
         video_writer.release()
-        video_writer_h264.release()
+        
         video_writer_mjpg.release()
         video_writer_mp4.release()
         video_writer_ffv1.release()
