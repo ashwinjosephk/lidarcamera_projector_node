@@ -27,6 +27,40 @@ def load_config(config_path):
         raise RuntimeError(f"Failed to load configuration file: {config_path}. Error: {str(e)}")
     return config
 
+def retain_original_colors_for_valid_points(lidar_points, image, transformed_points):
+    """Retain the original PCD colors for valid points that fall within the image bounds."""
+    print("Filtering point cloud to retain original colors for valid image-mapped points.")
+
+    Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
+    camera_intrinsics = load_camera_intrinsics()
+
+    # Step 1: Find valid points in front of the camera
+    valid_indices = np.where(Zc > 0)[0]
+    Xc, Yc, Zc = Xc[valid_indices], Yc[valid_indices], Zc[valid_indices]
+
+    # Step 2: Project points into image plane
+    x_proj = (camera_intrinsics["fx"] * Xc / Zc + camera_intrinsics["cx"]).astype(int)
+    y_proj = (camera_intrinsics["fy"] * Yc / Zc + camera_intrinsics["cy"]).astype(int)
+
+    # Step 3: Check if projections are within image bounds
+    inside_image = (x_proj >= 0) & (x_proj < image.shape[1]) & (y_proj >= 0) & (y_proj < image.shape[0])
+
+    # Step 4: Filter the valid indices
+    valid_indices = valid_indices[inside_image]
+
+    # Step 5: Just return the original colors for these points
+    original_colored_points = [
+        (
+            lidar_points[i][0], lidar_points[i][1], lidar_points[i][2],
+            int(lidar_points[i][3]), int(lidar_points[i][4]), int(lidar_points[i][5])
+        )
+        for i in valid_indices
+    ]
+
+    print("Successfully retained original colors for {} points.".format(len(original_colored_points)))
+    return original_colored_points, valid_indices
+
+
 def colorize_point_cloud_photorealisitc(lidar_points, image, transformed_points):
     """Colorize the point cloud based on the image colors with correct RGB values."""
     print("Colorizing the point cloud with RGB values.")
@@ -267,8 +301,9 @@ def save_filtered_odometry(filtered_odometry, odometry_txt_path):
 
     with open(odometry_txt_path, "w") as f:
         for timestamp, position, orientation in filtered_odometry:
-            # ✅ Save in format: timestamp, x, y, z, qx, qy, qz, qw
+            # ✅ Save in format: timestamp, x, y, z,qw, qx, qy, qz
+            # f.write(f"{timestamp:.6f},{position[0]:.6f},{position[1]:.6f},{position[2]:.6f},"
+            #         f"{orientation[3]:.6f},{orientation[0]:.6f},{orientation[1]:.6f},{orientation[2]:.6f}\n")
             f.write(f"{timestamp:.6f},{position[0]:.6f},{position[1]:.6f},{position[2]:.6f},"
                     f"{orientation[0]:.6f},{orientation[1]:.6f},{orientation[2]:.6f},{orientation[3]:.6f}\n")
-
     print(f"✅ Filtered trajectory (actually used values) saved to {odometry_txt_path}")

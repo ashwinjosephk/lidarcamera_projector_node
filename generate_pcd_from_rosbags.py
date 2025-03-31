@@ -15,7 +15,7 @@ from PIL import Image
 import yaml
 from viewPcdO3d import visualize_mapcloud, create_rectangle, filter_pcd_by_class, voxel_grid_downsample, visualize_pcd_with_custom_settings
 from stereodepth import compute_depth_from_stereo
-from utils import save_filtered_odometry, save_pointcloud_to_txt, compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc
+from utils import save_filtered_odometry, save_pointcloud_to_txt, compute_map_entropy, plot_entropy_distribution, filter_points_by_class, apply_color_map, generate_boat_trajectory_pcd, remove_water_using_ransac, load_config, load_camera_intrinsics, overlay_points_on_black_image, load_category_colors, colorize_point_cloud_semantic, colorize_point_cloud_photorealisitc, retain_original_colors_for_valid_points 
 import threading
 from queue import Queue
 import gc  
@@ -98,6 +98,18 @@ def combine_visualization(vis_semantic, image_with_red, vis_photo, overlayed_ima
     return final_combined
 
 
+def save_odometry_to_tum(odometry_data, output_file):
+    with open(output_file, 'w') as f:
+        # Write TUM format header
+        f.write("# timestamp tx ty tz qx qy qz qw\n")
+        
+        # Write each odometry entry
+        for timestamp, position, orientation in odometry_data:
+            line = f"{timestamp:.9f} {position[0]:.6f} {position[1]:.6f} {position[2]:.6f} "
+            line += f"{orientation[0]:.6f} {orientation[1]:.6f} {orientation[2]:.6f} {orientation[3]:.6f}\n"
+            f.write(line)
+
+    print(f"Odometry data saved to TUM format: {output_file}")
 
 
 
@@ -188,6 +200,7 @@ if __name__=="__main__":
         lidaroverlay_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_images/lidaroverlay_images".format(lidar_bag_base_name,lidar_bag_base_name)
         semantic_images_dump_folder = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_images/semantic_images".format(lidar_bag_base_name,lidar_bag_base_name)
         output_txt_dir = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}".format(lidar_bag_base_name)
+        output_lidar_slam_odom_file_file = "/home/knadmin/Ashwin/AURORA_dataset/Segmented3DMap/DATA/{}/{}_lidarslam_odom_tumformat.txt".format(lidar_bag_base_name,lidar_bag_base_name)
 
         output_folder = os.path.join(output_txt_dir,"output_pcd")
         if not os.path.exists(output_folder):
@@ -195,8 +208,9 @@ if __name__=="__main__":
 
         output_pcd_semantic_file = "{}/{}_trajectory_output_map_semantic.ply".format(output_folder,lidar_bag_base_name)
         output_pcd_photo_file = "{}/{}_trajectory_output_map_photo.ply".format(output_folder,lidar_bag_base_name)
+        output_pcd_original_filtered_file = "{}/{}_trajectory_output_map_original_filtered.ply".format(output_folder,lidar_bag_base_name)
         output_trajectory_pcd_file = "{}/{}_trajectory_output_map_trajectory.ply".format(output_folder,lidar_bag_base_name)
-        filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
+        # filtered_pcd_path = "{}/{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name)
         class_labels_dump_filename = "{}/{}_class_labels.npy".format(output_folder,lidar_bag_base_name)
         output_filtered_trajectory_file_path = "{}/{}_trajectory_filtered.txt".format(output_folder,lidar_bag_base_name)
         
@@ -269,14 +283,15 @@ if __name__=="__main__":
         5: ([157, 0, 255], "Other")
         }
         camera_intrinsics = load_camera_intrinsics()
-        selected_classes = [1, 2, 4]  #for filtering specific classes in the filtered pointcloud
+        selected_classes_list = [[1, 2, 4] ,[2,3],[4,5],[4],[3],[5],[2]]
+        # selected_classes = [1, 2, 4]  #for filtering specific classes in the filtered pointcloud
         #{"0": {"color": [135, 206, 250], "name": "Sky"}, "1": {"color": [0, 191, 255], "name": "Water"}, "2": {"color": [50, 205, 50], "name": "Vegetation"}, "3": {"color": [34, 139, 34], "name": "Riverbank"}, "4": {"color": [184, 134, 11], "name": "Bridge"}, "5": {"color": [157, 0, 255], "name": "Other"}}
 
         trajectory_flag = False
         apply_ransac_flag = False
         compute_map_entropy_flag = False
         downsample_pcd_flag = False
-        save_images_flag = False
+        save_images_flag = True
         generate_pcd_flag = True
         resize_flag = False
         load_data_mode = "rosbag_mode"  #"txt_file_mode"  #"rosbag_mode"
@@ -290,6 +305,7 @@ if __name__=="__main__":
         # cv2.namedWindow("Original left Camera Image",cv2.WINDOW_NORMAL)
         cv2.namedWindow("Original left Camera Image",cv2.WINDOW_NORMAL)
         cv2.namedWindow("Original Image with lidar points in red projected", cv2.WINDOW_NORMAL) 
+        cv2.namedWindow("Original Image with lidar points in distance colorized projected", cv2.WINDOW_NORMAL) 
         cv2.namedWindow("Only Lidar points with Photo colour", cv2.WINDOW_NORMAL) 
         cv2.namedWindow("Semantic Image", cv2.WINDOW_NORMAL) 
         cv2.namedWindow("Alpha Blended Image",cv2.WINDOW_NORMAL)
@@ -414,7 +430,8 @@ if __name__=="__main__":
         elif load_data_mode == 'txt_file_mode':
             odometry_data = load_odometry_from_txt(odometry_txt_path)
 
-
+        save_odometry_to_tum(odometry_data, output_lidar_slam_odom_file_file)
+        # exit()
 
 
         odometry_timestamps = [x[0] for x in odometry_data]
@@ -478,6 +495,13 @@ if __name__=="__main__":
         topic_info = lidar_bag.get_type_and_topic_info()
         total_lidar_messages = topic_info.topics[lidar_topic].message_count
         total_lidar_messages_to_be_processed = (total_lidar_messages/4)
+
+        # Initialize global min and max distance values
+        global_min_distance = None
+        global_max_distance = None
+        decay_factor = 0.95  # Use this to make the changes smooth (optional)
+
+
 
         for topic, msg, t in lidar_bag.read_messages(topics=[lidar_topic, left_image_topic, right_image_topic]):
             timestamp = msg.header.stamp.secs + msg.header.stamp.nsecs * 1e-9  # High-precision timestamp
@@ -563,6 +587,12 @@ if __name__=="__main__":
 
                 Xc, Yc, Zc = transformed_points[:, 0], transformed_points[:, 1], transformed_points[:, 2]
 
+
+
+
+
+
+
                 print("Number of valid points before filtering: {} (In Total Points)".format(len(Xc)))
 
                 valid_indices = Zc > 0
@@ -582,11 +612,50 @@ if __name__=="__main__":
                 count_trues_projected = np.sum(valid_points)
                 print("Number of valid points after using points within image {} (and after z axes filtering)".format(count_trues_projected))
 
+
+                # Get the Z-axis distances of the transformed points
+                distances = transformed_points[:, 2]
+
+                # Only consider valid points (positive Z and within image boundary)
+                distances = distances[valid_indices]
+
+                if len(distances) > 0:
+                    # Compute current frame's min and max distance
+                    frame_min_distance = np.percentile(distances, 5)
+                    frame_max_distance = np.percentile(distances, 95)
+                    
+                    if global_min_distance is None or global_max_distance is None:
+                        # Initialize global min and max on the first frame
+                        global_min_distance = frame_min_distance
+                        global_max_distance = frame_max_distance
+                    else:
+                        # Smoothly update the global min and max using a decay factor
+                        global_min_distance = decay_factor * global_min_distance + (1 - decay_factor) * frame_min_distance
+                        global_max_distance = decay_factor * global_max_distance + (1 - decay_factor) * frame_max_distance
+
+                    # Clip distances to the updated global range
+                    distances_clipped = np.clip(distances, global_min_distance, global_max_distance)
+
+                    # Apply logarithmic scaling for better visualization
+                    distances_log_scaled = np.log1p(distances_clipped - global_min_distance)
+
+                    # Normalize between 0 and 1
+                    normalized_distances = (distances_log_scaled - distances_log_scaled.min()) / (distances_log_scaled.max() - distances_log_scaled.min())
+
+                    # Map to colors using COLORMAP_JET
+                    distance_colors = cv2.applyColorMap((normalized_distances * 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+
+
+
+
+
                 x_proj, y_proj = x_proj[valid_points], y_proj[valid_points]
 
                 # 1️⃣ Create the original image with red-projected points
                 mask = np.zeros(left_image.shape[:2], dtype=np.uint8)
                 image_with_red = left_image.copy()
+                image_with_distancecolored_points = left_image.copy()
                 point_size = 2
                 for x, y in zip(x_proj, y_proj):
                     x_start, x_end = max(0, x - point_size), min(left_image.shape[1], x + point_size + 1)
@@ -594,7 +663,20 @@ if __name__=="__main__":
                     image_with_red[y_start:y_end, x_start:x_end] = [0, 0, 255]  # Red color
                     mask[y_start:y_end, x_start:x_end] = 255  # White mask
 
+                
+                for (x, y), color in zip(zip(x_proj, y_proj), distance_colors):
+                    # Convert the NumPy array to a tuple of integers
+                    color_tuple = tuple(map(int, color[0]))  # Extract the inner array and convert to tuple
+
+                    if 0 <= x < image_with_distancecolored_points.shape[1] and 0 <= y < image_with_distancecolored_points.shape[0]:
+                        cv2.circle(image_with_distancecolored_points, (x, y), point_size, color_tuple, -1)
+
+
+
+
+
                 colored_points_photo, valid_indices  = colorize_point_cloud_photorealisitc(lidar_points, left_image, transformed_points)
+                original_colored_filtered_points, valid_indices = retain_original_colors_for_valid_points(lidar_points, left_image, transformed_points)
 
                 #code part to run inference of semantic segmentation
                 semantic_predictions, semantic_color_mask = semantic_segmentation_inference(left_image, model, processor)
@@ -617,7 +699,7 @@ if __name__=="__main__":
                 # Save transformed + colorized LiDAR points to TXT
                 save_pointcloud_to_txt(frame_count, transformed_points, colored_points_photo, valid_indices, timestamp, lidar_points, output_folder, mode='photo')
                 save_pointcloud_to_txt(frame_count, transformed_points, colored_points_semantic, valid_indices, timestamp, lidar_points, output_folder, mode='semantic')
-
+                save_pointcloud_to_txt(frame_count, transformed_points, original_colored_filtered_points, valid_indices, timestamp, lidar_points, output_folder, mode='original_filtered')
                 
 
                 
@@ -633,7 +715,7 @@ if __name__=="__main__":
                     gc.collect()
                     print("Garbage collection triggered to free up memory.")
 
-
+                
                 
                 valid_points = points[valid_indices] 
             
@@ -647,6 +729,7 @@ if __name__=="__main__":
                 black_image = overlay_points_on_black_image(x_proj, y_proj, left_image)
 
                 cv2.imshow("Original Image with lidar points in red projected",image_with_red) 
+                cv2.imshow("Original Image with lidar points in distance colorized projected",image_with_distancecolored_points)
                 cv2.imshow("Only Lidar points with Photo colour", black_image) 
                 cv2.imshow("Semantic Image", semantic_color_mask) 
                 cv2.imshow("Alpha Blended Image", overlayed_image) 
@@ -799,6 +882,11 @@ if __name__=="__main__":
         # vis.destroy_window()
         print("************************")
 
+
+        end_time = time.time()
+        time_taken = end_time - start_time
+        print("Total TIme taken",time_taken)
+
         # Convert to Open3D format
         pcd_points = np.vstack(pcd_points)
         semantic_colors_list = np.vstack(semantic_colors_list)
@@ -825,6 +913,9 @@ if __name__=="__main__":
         pcd_photo = o3d.geometry.PointCloud()
         pcd_photo.points = o3d.utility.Vector3dVector(pcd_points)
         pcd_photo.colors = o3d.utility.Vector3dVector(photo_colors_list)
+
+        pcd_original_filtered = o3d.geometry.PointCloud()
+        pcd_original_filtered.points = o3d.utility.Vector3dVector(pcd_points)
         
 
         # car_points = filter_points_by_class(pcd, car_class_label)
@@ -833,6 +924,7 @@ if __name__=="__main__":
             # Apply RANSAC to remove water reflections (ground-like surface)
             pcd_semantic = remove_water_using_ransac(pcd_semantic)
             pcd_photo = remove_water_using_ransac(pcd_photo)
+            pcd_original_filtered = remove_water_using_ransac(pcd_original_filtered)
 
         if compute_map_entropy_flag:
             # Compute entropy
@@ -842,6 +934,7 @@ if __name__=="__main__":
         if downsample_pcd_flag:
             pcd_semantic = voxel_grid_downsample(pcd_semantic, voxel_size=0.2)  # Adjust voxel size for detail
             pcd_photo = voxel_grid_downsample(pcd_photo, voxel_size=0.2) 
+            pcd_original_filtered = voxel_grid_downsample(pcd_original_filtered, voxel_size=0.2) 
 
         if trajectory_flag:
             # Generate trajectory point cloud for the boat's movement
@@ -850,11 +943,10 @@ if __name__=="__main__":
             # Merge LiDAR and trajectory point clouds into one visualization
             combined_pcd_semantic = pcd_semantic + trajectory_pcd  # Combine both datasets
             combined_pcd_photo = pcd_photo + trajectory_pcd 
+            combined_original_filtered = pcd_original_filtered + trajectory_pcd 
 
         np.save(class_labels_dump_filename, class_labels_array)
-        end_time = time.time()
-        time_taken = end_time - start_time
-        print("Total TIme taken",time_taken)
+
 
         if generate_pcd_flag:
             # Save the final point clouds
@@ -864,6 +956,8 @@ if __name__=="__main__":
                 o3d.io.write_point_cloud(output_pcd_semantic_file, combined_pcd_semantic)
                 o3d.io.write_point_cloud(output_pcd_photo_file, combined_pcd_photo)
                 o3d.io.write_point_cloud(output_trajectory_pcd_file, trajectory_pcd)
+                o3d.io.write_point_cloud(output_pcd_original_filtered_file, combined_original_filtered)
+                
 
 
 
@@ -881,9 +975,11 @@ if __name__=="__main__":
                 configure_view(vis3, trajectory_pcd)
 
                 # ✅ Filter and visualize selected classes
-                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes, CATEGORY_COLORS)
-                o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
-                print("✅ Filtered PCD saved as filtered_pcd.ply")
+                for selected_classes in selected_classes_list:
+                    filtered_pcd_path = "{}/{}_{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name,selected_classes)
+                    filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes, CATEGORY_COLORS)
+                    o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
+                    print("✅ Filtered PCD saved as filtered_pcd.ply")
 
                 vis4 = o3d.visualization.Visualizer()
                 vis4.create_window(window_name="Filtered Pointcloud")
@@ -892,6 +988,7 @@ if __name__=="__main__":
             else:
                 o3d.io.write_point_cloud(output_pcd_semantic_file, pcd_semantic)
                 o3d.io.write_point_cloud(output_pcd_photo_file, pcd_photo)
+                o3d.io.write_point_cloud(output_pcd_original_filtered_file, pcd_original_filtered)
 
                 # Load and apply the visualization config
                 config_path = "config/pcd_config.yaml"
@@ -904,14 +1001,19 @@ if __name__=="__main__":
                 map_cloud_photo = o3d.io.read_point_cloud(output_pcd_photo_file)   
                 visualize_mapcloud(map_cloud_photo, config)
 
-                # ✅ Filter and visualize selected classes
-                filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes, CATEGORY_COLORS)
-                o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
-                print("✅ Filtered PCD saved as filtered_pcd.ply")
+                map_cloud_original_filtered = o3d.io.read_point_cloud(output_pcd_original_filtered_file)   
+                visualize_mapcloud(map_cloud_original_filtered, config)
 
-                vis5 = o3d.visualization.Visualizer()
-                vis5.create_window(window_name="Filtered Pointcloud")
-                configure_view(vis5, filtered_pcd)
+                # ✅ Filter and visualize selected classes
+                for selected_classes in selected_classes_list:
+                    filtered_pcd_path = "{}/{}_{}_filtered_pcd.ply".format(output_folder,lidar_bag_base_name,selected_classes)
+                    filtered_pcd = filter_pcd_by_class(pcd_semantic, class_labels_dump_filename, selected_classes, CATEGORY_COLORS)
+                    o3d.io.write_point_cloud(filtered_pcd_path, filtered_pcd)
+                    print("✅ Filtered PCD saved as filtered_pcd.ply")
+
+                    vis5 = o3d.visualization.Visualizer()
+                    vis5.create_window(window_name="Filtered Pointcloud")
+                    configure_view(vis5, filtered_pcd)
 
         # Close lidar bag after processing
         lidar_bag.close()
